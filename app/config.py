@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     # Local Config
     OLLAMA_BASE_URL: str = "http://host.docker.internal:11434/api/generate"
 
+    # Storage Config (MinIO)
+    # In the production, these would come from .env files
+    MINIO_ENDPOINT: str = "http://localhost:9000"
+    MINIO_ACCESS_KEY: str = "minioadmin"
+    MINIO_SECRET_KEY: str = "minioadmin"
+    MINIO_BUCKET_NAME: str = "resumes"
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 # Initialize settings

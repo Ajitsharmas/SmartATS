@@ -2,16 +2,20 @@
 # Purpose: The entry point of  ATS endpoint
 # Author: Ajit Sharma S
 # ----------------------------------------------------------------------------------------------------
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from sqlmodel import Session, select
 from typing import Annotated, List
 from contextlib import asynccontextmanager
+import uuid
+import pypdf
+import io 
 
 # Import our local modules
 from app.database import create_db_and_tables, get_session
 from app.models import JobListing, AnalysisRequest
 from app.ai import get_ai_provider, AIProvider
-
+from app.utils import init_storage, get_s3_client
+from app.config import settings
 
 # 1. Lifespan Context Manager
 # This runs code before the app starts and after it shuts down.
@@ -20,9 +24,10 @@ from app.ai import get_ai_provider, AIProvider
 async def lifespan(app: FastAPI):
     print("Startup: Creating database tables...")
     create_db_and_tables()
+    print("Startup: Checking Object Storage...")
+    init_storage()
     yield
     print("Shutdown: Cleaning up resources...")
-
 
 app = FastAPI(
     title = "ATS",
@@ -106,3 +111,62 @@ async def analyze_resume_text(request: AnalysisRequest, ai: AIDep):
     return {"analysis": analysis}
 
 
+# -------------------------------File Upload Router---------------------------------------------
+@app.post("/upload")
+async def upload_resume(file: UploadFile = File(...)):
+    """
+    Accepts a temporary file, validates it, extracts text, and saves to minIO
+    """
+    # 1. Validation: Check File Extension 
+    if file.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Invalid file type. Only PDFs are allowed.")
+    
+    # 2. Validation: Magic Numbners (The Real Security Check)
+    # Read the first 4 bytes to verify it's a true PDF header (%PDF)
+    header = await file.read(4)
+    if header != b"%PDF":
+        raise HTTPException(status_code=400, detail="Corrupt or invalid PDF file.")
+
+    # CRITICAL: Reset the cursor
+    # We just read 4 bytes. If we don't rewind, the PDF reader will start reading from byte 5 and fail.
+    await file.seek(0)
+
+    # 3. Read the content for processing
+    # In a perfect world, we should stream this. But pypdf requires file in memory.
+    # Since resumes are small (< 5MB), reading to RAM is acceptable here.
+    content = await file.read()
+
+    # 4. Text Extraction (The Intelligence)
+    try:
+        # We wrap the raw bytes in BytesIO so pypdf thinks it's a real file
+        pdf_reader = pypdf.PdfReader(io.BytesIO(content))
+        extracted_text=""
+        for page in pdf_reader.pages:
+            extracted_text += page.extract_text() or ""
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to extract teext: {str(e)}")
+
+    
+    # 5. Generate uniqure Key (The Storage Strategy)
+    file_id = str(uuid.uuid4())
+    s3_key = f"{file_id}.pdf"
+
+    # 6. Upload to MinIO (The Vault)
+    try:
+        s3 = get_s3_client()
+        s3.put_object(
+            Bucket=settings.MINIO_BUCKET_NAME,
+            Key=s3_key,
+            Body=content,
+            ContentType="application/pdf"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Storage Error: {str(e)}")
+    
+    # 7. Return Metadata
+    return {
+        "file_id": file_id,
+        "filename": file.filename,
+        "s3_key": s3_key,
+        "extracted_text_preview": extracted_text[:200] + "..." # Peek at thje result
+    }
