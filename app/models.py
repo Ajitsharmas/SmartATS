@@ -36,3 +36,8 @@ class JobListing(SQLModel, table=True):
             raise ValueError("Salary cannot be negative. We pay people here!")
         
         return value
+
+class AnalysisRequest(SQLModel):
+    text: str
+
+

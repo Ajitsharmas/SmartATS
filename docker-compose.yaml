@@ -2,7 +2,7 @@
 # Purpose: Define the infrastructure stack (DB, Redis, MinIO)
 #----------------------------------------------------------------------------------------------------------------------------
 
-name: resumeroast
+name: smartats
 
 services:
   # 1. The Postgres Database
