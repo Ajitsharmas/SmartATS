@@ -88,7 +88,7 @@ async def analyze_resume_text(request: AnalysisRequest, ai: AIDep):
     # We explicitly ask for JSON so we can parse it programatically later.
 
     prompt = f"""
-    You are an expert tech recruiter. Analyze the followui=ing resume text against a generic Senior Developer role.
+    You are an expert tech recruiter. Analyze the following resume text against a generic Senior Developer role.
 
     Return your response in this exact JSON format:
     {{
