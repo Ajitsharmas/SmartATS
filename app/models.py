@@ -37,7 +37,20 @@ class JobListing(SQLModel, table=True):
         
         return value
 
+class User(SQLModel, table=True):
+    """
+    Represents a registered user (Recruiter/Admin) in the system.
+    """
+    id: int | None = Field(default=None, primary_key=True)
+    email: str = Field(unique=True, index=True)
+    hashed_password: str
+    full_name: str | None = None
+    is_active: bool = True
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
 class AnalysisRequest(SQLModel):
     text: str
+
 
 

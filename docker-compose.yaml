@@ -38,6 +38,32 @@ services:
       - "9001:9001" # Console Port
     volumes:
       - minio_data:/data
+
+  # 4. The API Server ( FastAPI) - We explicitly definte this now 
+  # PReviously we ran this locally , but to network correctly with the worker 
+  # inside Docker, it helps to define the dstructure.
+  # For thischapter, we will stick to running the worker defnition here
+  # But might execute locally for ease of debugging
+
+  # 5. The background Worker (Celery)
+  worker:
+    build: .
+    command: celery -A app.worker.celery_app worker --loglevel=info
+    volumes:
+      - .:/app
+    environment:
+      # Override localhost with container names
+      CELERY_BROKER_URL: redis://redis:6739/0
+      CELERY_RESULT_BACKEND: redis://redis:6739/0
+      DATABSE_URL: postgresql://resume_user:resume_pass@db:5432/resume_db
+      MINIO_ENDPOINT: http://minio:9000
+      # AI COnfigs
+      AI_MODE: gemini
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    depends_on:
+    - redis
+    - db
+
   
 volumes:
   postgres_data:

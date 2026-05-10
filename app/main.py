@@ -12,11 +12,15 @@ import io
 
 # Import our local modules
 from app.database import create_db_and_tables, get_session
-from app.models import JobListing, AnalysisRequest
+from app.models import JobListing, AnalysisRequest, User
 from app.ai import get_ai_provider, AIProvider
 from app.utils import init_storage, get_s3_client
+# Import the tasd to trigger it, and the app instance to check results.
+from app.worker import analyze_resume_task, celery_app
+from celery.result import AsyncResult
 from app.config import settings
-
+# Security related imports
+from app.auth import auth_router, get_current_user # Import the router and dependency
 # 1. Lifespan Context Manager
 # This runs code before the app starts and after it shuts down.
 # We use it to create our database tables automatically on startup.
@@ -36,6 +40,9 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# 2. Register the Auth Router
+# This adds /token and /register to our API
+app.include_router(auth_router)
 
 # 2 Define a Dependency Injection type alias
 # This makes our path operations cleaner.
@@ -56,10 +63,13 @@ async def health_check():
 # ----------------------------JOB ROUTES------------------------------------------
 
 # 3. Create a Job (POST)
+# If user is not logged in, this fuction will NEVER run.
 @app.post("/jobs", response_model=JobListing)
-def create_job(job: JobListing, session: SessionDep):
+def create_job(job: JobListing,
+               session: SessionDep,
+               current_user: Annotated[User, Depends(get_current_user)]):
     """
-    Create a new Job Listing.
+    Create a new Job Listing (Registered Recruiters only)
     """
 
     session.add(job)        # Add to Session, ready to Save to DB
@@ -113,7 +123,10 @@ async def analyze_resume_text(request: AnalysisRequest, ai: AIDep):
 
 # -------------------------------File Upload Router---------------------------------------------
 @app.post("/upload")
-async def upload_resume(file: UploadFile = File(...)):
+async def upload_resume(
+    current_user: Annotated[User, Depends(get_current_user)], # Required Arguments need to come before Default Arguments always
+    file: UploadFile = File(...)
+):
     """
     Accepts a temporary file, validates it, extracts text, and saves to minIO
     """
@@ -170,3 +183,63 @@ async def upload_resume(file: UploadFile = File(...)):
         "s3_key": s3_key,
         "extracted_text_preview": extracted_text[:200] + "..." # Peek at thje result
     }
+
+
+#------------------------------------------Async AI Routes (Fire and forget Pattern)--------------------------------------------------------
+@app.post("/analyze_async")
+async def analyze_resume_async(
+    request: AnalysisRequest,
+    current_user: Annotated[User, Depends(get_current_user)]
+):
+    """
+    Triggers a background AI analysis.
+    Returns a Task ID instantly. Does NOT wait for the AI to finish. 
+    """
+
+    # 1. Push the Task to Redis
+    # .delay() is the magic method. It serializes the function call
+    # and sends it to the Message Brojker.
+    task = analyze_resume_task.delay(request.text)
+
+    # 2. Return the Ticket (Task ID) immediately
+    # We use status_code=202 (Acceepted) to indicate processing has started but not finished.
+    return {
+        "message": "Resume accepted for processing. ",
+        "task_id": task.id,
+        "status_url": f"/analyze_async/{task.id}"
+    }
+
+# Check status of resume processing task
+@app.get("/analyze_async/{task_id}")
+async def get_analyze_resume_async_status(task_id: str):
+    """
+    Polls the status of a background task.
+    Clients should call this every few seconds until status is 'Done'.
+    """
+
+    # 1. Fetch the Task Metadata from Redis
+    # AsyncResult looks up the task_id in the Result Backend.
+    task_result = AsyncResult(task_id, app=celery_app)
+
+    # 2. Check the Lifecycle State
+    if task_result.state == "PENDING":
+        return {
+            "status": "Processing",
+            "result": None
+        }
+    elif task_result.state == "SUCCESS":
+        # The worker finished successfully. The restuirn value is in .result
+        return {
+            "status": "Done",
+            "result": task_result.result
+        }
+    elif task_result.state == "FAILURE":
+        # The worker crashed (e.g. AI API Error). The exception is in .result
+        return {
+            "status": "Failed",
+            "error": str(task_result.result)
+        }
+    
+    # Catch-all for other states like "RETRY" and "STARTED"
+    return {"status": task_result.state}
+        

@@ -28,6 +28,18 @@ class Settings(BaseSettings):
     MINIO_SECRET_KEY: str = "minioadmin"
     MINIO_BUCKET_NAME: str = "resumes"
 
+    # Celery & Redis Config
+    #The URL for the Broker (TThe Queue)
+    CELERY_BROKER_URL: str = "redis://localhost:6379/0"
+    # The URL for the Backend (where the results are stored)
+    CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
+
+    # Security Configs
+    # Run "openssl rand -hex 32" in terminal to generate a real key
+    SECRET_KEY: str = "79f0da0c3f80646ad690a44e39706380c40d0d777f5df57ad531c218f86bb270"
+    ALGORITHM: str ="HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 # Initialize settings
