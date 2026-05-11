@@ -93,7 +93,7 @@
             
             <div class="mt-6 flex justify-end space-x-3">
                 <a id="downloadResume" href="#" target="_blank" class="px-4 py-2 bg-white border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 font-medium">Download Resume</a>
-                <button onclick="document.getElementById('AtsModal').classList.add('hidden')" class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium">Close</button>
+                <button onclick="document.getElementById('atsModal').classList.add('hidden')" class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium">Close</button>
             </div>
         </div>
     </div>
@@ -112,7 +112,7 @@
         // 1. Load Jobs
         async function loadJobs() {
             try {
-                const jobs = await Api.getJobs();
+                const jobs = await Api.getMyJobs();
                 const list = document.getElementById('jobsList');
                 list.innerHTML = jobs.map(job => `
                     <div onclick="loadApplicants(${job.id}, '${job.title.replace(/'/g, "\\'")}')" 
@@ -223,7 +223,7 @@
                 loadJobs();
                 e.target.reset();
             } catch(err) {
-                alert(err.message);
+                // api.js already shows the error modal
             }
         });
     </script>

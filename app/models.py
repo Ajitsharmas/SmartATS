@@ -10,7 +10,7 @@ from pydantic import (
     EmailStr,
     field_validator,
 )  # Added EmailStr for robust validation
-from sqlmodel import Field, SQLModel
+from sqlmodel import Field, SQLModel, UniqueConstraint
 
 
 # --- JOB LISTING MODELS ---
@@ -25,6 +25,7 @@ class JobListing(SQLModel, table=True):
     model_config = ConfigDict(validate_assignment=True)
 
     id: int | None = Field(default=None, primary_key=True)
+    owner_id: int | None = Field(default=None, foreign_key="user.id", index=True)
 
     # 2. THE LENGTH CONSTRAINTS
     # Title: Must be professional (no 3-letter acronyms like "Dev").
@@ -133,6 +134,10 @@ class Application(SQLModel, table=True):
     The "Join Table" connecting a Candidate to a Job Listing.
     Stores the status of the application and the permanent AI Score.
     """
+
+    __table_args__ = (
+        UniqueConstraint("job_id", "candidate_email", name="uq_application_job_email"),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
 

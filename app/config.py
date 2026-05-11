@@ -36,6 +36,7 @@ class Settings(BaseSettings):
 
     # Security Configs
     # Run "openssl rand -hex 32" in terminal to generate a real key
+    # We pasted an example Dummy key below
     SECRET_KEY: str = "79f0da0c3f80646ad690a44e39706380c40d0d777f5df57ad531c218f86bb270"
     ALGORITHM: str ="HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30

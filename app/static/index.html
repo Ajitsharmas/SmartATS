@@ -158,38 +158,59 @@
             }
         });
 
-        // 4. Submit (The Fix!)
+        // 4. Submit
         document.getElementById('applicationForm').addEventListener('submit', async (e) => {
             e.preventDefault();
-            const btn = document.getElementById('submitBtn');
-            btn.disabled = true;
-            btn.innerHTML = "Processing...";
 
-            try {
-                // A. Upload PDF
-                const uploadResult = await Api.uploadResume(fileInput.files[0]);
+            // A. Frontend validation
+            const name = document.getElementById('candidateName').value.trim();
+            const email = document.getElementById('candidateEmail').value.trim();
+            const file = fileInput.files[0];
 
-                // B. Submit Full Application
-                // This calls the NEW 'submitApplication' method
-                const payload = {
-                    request: { text: uploadResult.extracted_text_preview },
-                    job_id: selectedJob.id,
-                    candidate_name: document.getElementById('candidateName').value,
-                    candidate_email: document.getElementById('candidateEmail').value,
-                    resume_url: uploadResult.file_url
-                };
+            if (!name)  { showModal("Please enter your full name."); return; }
+            if (!email) { showModal("Please enter your email address."); return; }
+            if (!file)  { showModal("Please upload your resume (PDF) before submitting."); return; }
 
-                await Api.submitApplication(payload);
+            // B. Confirm before uploading
+            showConfirmModal({
+                title: "Confirm Your Application",
+                details: [
+                    { label: "Applying For", value: selectedJob.title },
+                    { label: "Name",          value: name },
+                    { label: "Email",         value: email },
+                    { label: "Resume",        value: file.name },
+                ],
+                confirmText: "Submit Application",
+                note: "Application once submitted cannot be modified.",
+                onConfirm: async () => {
+                    const btn = document.getElementById('submitBtn');
+                    btn.disabled = true;
+                    btn.innerHTML = "Processing...";
 
-                // C. Success
-                document.getElementById('applicationForm').classList.add('hidden');
-                document.getElementById('successState').classList.remove('hidden');
+                    try {
+                        // C. Upload PDF (only after confirmation)
+                        const uploadResult = await Api.uploadResume(file);
+                        if (!uploadResult) { btn.disabled = false; btn.innerHTML = "Submit Application"; return; }
 
-            } catch (err) {
-                alert("Error: " + err.message);
-                btn.disabled = false;
-                btn.innerHTML = "Submit Application";
-            }
+                        // D. Submit application
+                        await Api.submitApplication({
+                            request: { text: uploadResult.extracted_text_preview },
+                            job_id: selectedJob.id,
+                            candidate_name: name,
+                            candidate_email: email,
+                            resume_url: uploadResult.file_url
+                        });
+
+                        // E. Success
+                        document.getElementById('applicationForm').classList.add('hidden');
+                        document.getElementById('successState').classList.remove('hidden');
+
+                    } catch (err) {
+                        btn.disabled = false;
+                        btn.innerHTML = "Submit Application";
+                    }
+                }
+            });
         });
 
         loadJobs();

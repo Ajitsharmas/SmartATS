@@ -57,7 +57,7 @@
                 Api.setToken(data.access_token);
                 window.location.href = '/dashboard';
             } catch (error) {
-                // Api class handles alerts
+                showModal(error.message || "Invalid email or password.");
             }
         });
     </script>

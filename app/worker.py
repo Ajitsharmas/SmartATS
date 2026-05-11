@@ -64,6 +64,7 @@ def analyze_resume_task(text_content: str, application_id: int) -> dict:
         # asyncio.run() creates a temporary event loop just for this one function call.
 
         raw_response = asyncio.run(ai_provider.analyze_text(prompt))
+        print(f"Worker: Raw AI response for App {application_id}: {raw_response!r}")
 
         # B. Parse AI Response (The "Sanitization" Step)
         # LLMs often wrap JSON in Markdown code blocks (```json ... ```).
@@ -71,7 +72,12 @@ def analyze_resume_task(text_content: str, application_id: int) -> dict:
         cleaned_response = (
             raw_response.replace("```json", "").replace("```", "").strip()
         )
-        analysis_data = json.loads(cleaned_response)
+        try:
+            analysis_data = json.loads(cleaned_response)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"AI returned non-JSON response: {cleaned_response!r}"
+            ) from e
 
         # Extract data with safety defaults
         score = analysis_data.get("score", 0)

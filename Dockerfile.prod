@@ -1,0 +1,42 @@
+# -----------------------------------------------------------------------------------------------------------------------------------------------
+# Purpose: Production Multi-Stage build
+# -----------------------------------------------------------------------------------------------------------------------------------------------
+
+# --------------------------------------------- STAGE 1: THE BUILDER ----------------------------------------------
+FROM python:3.11.9-slim as builder
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Install system dependencies into a temporary directory
+COPY requirements.txt .
+RUN pip install --prefix=/install -r requirements.txt
+
+#------------------------------------------------ STAGE 2: The RUNNER -----------------------------------------------
+FROM python:3.11.9-slim
+
+WORKDIR /app
+
+# Use libpq-dev instead of libpq-5.
+# It is more reliable across different Debian versions.
+RUN apt-get update && apt-get install -y \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the installed python packages from the Builder stage
+COPY --from=builder /install /usr/local
+
+# Copy our actual application code
+COPY . .
+
+# Create a non-root user for security
+RUN useradd -m appuser
+USER appuser
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+

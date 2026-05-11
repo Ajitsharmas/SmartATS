@@ -12,7 +12,7 @@ import pypdf
 # Background Task Imports
 from celery.result import AsyncResult  # To check status
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
 
@@ -26,6 +26,8 @@ from app.database import create_db_and_tables, get_session
 # CRITICAL: We import ApplicationSubmit here to handle the full frontend payload
 from app.models import AnalysisRequest, Application, ApplicationSubmit, JobListing, User
 from app.utils import get_s3_client, init_storage
+from sqlalchemy.exc import IntegrityError
+
 from app.worker import analyze_resume_task, celery_app
 
 
@@ -58,24 +60,26 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 # 3. PAGE ROUTES (Serving HTML)
 # These endpoints just return the raw HTML files.
 # The JavaScript inside those files will call our JSON APIs later.
+_NO_CACHE = {"Cache-Control": "no-store"}
+
 @app.get("/")
 async def read_root():
-    return FileResponse("app/static/index.html")
+    return FileResponse("app/static/index.html", headers=_NO_CACHE)
 
 
 @app.get("/dashboard")
 async def read_dashboard():
-    return FileResponse("app/static/dashboard.html")
+    return FileResponse("app/static/dashboard.html", headers=_NO_CACHE)
 
 
 @app.get("/login")
 async def read_login():
-    return FileResponse("app/static/login.html")
+    return FileResponse("app/static/login.html", headers=_NO_CACHE)
 
 
 @app.get("/register")
 async def read_register():
-    return FileResponse("app/static/register.html")
+    return FileResponse("app/static/register.html", headers=_NO_CACHE)
 
 
 # --- 4. REGISTER MODULES ---
@@ -111,22 +115,34 @@ def create_job(
     """
     Create a new Job Listing (Protected: Recruiters Only).
     """
-    session.add(job)  # Add to the "Shopping Cart"
-    session.commit()  # Checkout (Save to DB)
-    session.refresh(job)  # Get the new ID from the DB
+    job.owner_id = current_user.id
+    session.add(job)
+    session.commit()
+    session.refresh(job)
     return job
 
 
-# List all Jobs (GET)
-# PUBLIC: No 'current_user' dependency here. Anyone can view jobs.
+# List all Jobs (GET) — PUBLIC for candidates
 @app.get("/jobs", response_model=List[JobListing])
 def list_jobs(session: SessionDep):
     """
-    Retrieve all open job positions.
+    Retrieve all open job positions (public, used by candidates).
     """
-    statement = select(JobListing)
-    jobs = session.exec(statement).all()
-    return jobs
+    return session.exec(select(JobListing)).all()
+
+
+# List only the logged-in recruiter's jobs — PROTECTED
+@app.get("/my-jobs", response_model=List[JobListing])
+def list_my_jobs(
+    session: SessionDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    """
+    Retrieve job listings owned by the current recruiter.
+    """
+    return session.exec(
+        select(JobListing).where(JobListing.owner_id == current_user.id)
+    ).all()
 
 
 # --- AI ANALYSIS ROUTES (Direct Test) ---
@@ -207,8 +223,8 @@ async def upload_resume(
         raise HTTPException(status_code=500, detail=f"Storage Error: {str(e)}")
 
     # 7. Return Metadata
-    # We return the MinIO URL so the frontend can display a "Download" link.
-    file_url = f"{settings.MINIO_ENDPOINT}/{settings.MINIO_BUCKET_NAME}/{s3_key}"
+    # Use the FastAPI proxy path — MinIO is internal-only and unreachable by browsers.
+    file_url = f"/download/{s3_key}"
 
     return {
         "file_id": file_id,
@@ -217,6 +233,24 @@ async def upload_resume(
         "extracted_text_preview": extracted_text[:200] + "...",
         "file_url": file_url,  # Needed for the frontend!
     }
+
+
+@app.get("/download/{s3_key}")
+async def download_resume(s3_key: str):
+    """
+    Proxy endpoint: fetches the PDF from MinIO (internal) and streams it to the browser.
+    MinIO is not publicly accessible, so the browser must go through FastAPI.
+    """
+    try:
+        s3 = get_s3_client()
+        obj = s3.get_object(Bucket=settings.MINIO_BUCKET_NAME, Key=s3_key)
+        return StreamingResponse(
+            obj["Body"],
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"inline; filename={s3_key}"},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Resume not found: {str(e)}")
 
 
 # --- APPLICATION ROUTES ---
@@ -259,9 +293,16 @@ async def process_resume(payload: ApplicationSubmit, session: SessionDep):
         resume_url=payload.resume_url,
         status="pending",
     )
-    session.add(app_record)
-    session.commit()
-    session.refresh(app_record)
+    try:
+        session.add(app_record)
+        session.commit()
+        session.refresh(app_record)
+    except IntegrityError:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="You have already applied for this posting. Multiple applications are not allowed for the same job.",
+        )
 
     # B. Trigger Worker
     # CRITICAL: We pass the 'application_id' (app_record.id) to the worker.

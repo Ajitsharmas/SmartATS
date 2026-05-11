@@ -58,6 +58,17 @@
                 <p class="text-xs text-slate-400 mt-1 text-right">Must be at least 4 characters</p>
             </div>
 
+            <div>
+                <label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Confirm Password</label>
+                <div class="relative">
+                    <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                        <i data-lucide="lock" class="h-5 w-5 text-slate-400"></i>
+                    </div>
+                    <input type="password" id="confirmPassword" required placeholder="••••••••"
+                        class="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition text-slate-800">
+                </div>
+            </div>
+
             <button type="submit"
                 class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-lg shadow-sm hover:shadow-md transition duration-200 flex justify-center items-center">
                 <span>Create Account</span>
@@ -81,36 +92,50 @@
         document.getElementById('registerForm').addEventListener('submit', async (e) => {
             e.preventDefault();
 
-            // 1. Gather Data
-            const fullName = document.getElementById('fullName').value;
-            const email = document.getElementById('email').value;
+            const fullName = document.getElementById('fullName').value.trim();
+            const email    = document.getElementById('email').value.trim();
             const password = document.getElementById('password').value;
-            const btn = e.target.querySelector('button');
+            const confirm  = document.getElementById('confirmPassword').value;
+            const btn      = e.target.querySelector('button[type="submit"]');
 
-            // 2. Loading State
-            const originalText = btn.innerHTML;
-            btn.innerHTML = `<div class="loader mr-2"></div> Creating...`;
-            btn.disabled = true;
-
-            try {
-                // 3. Call API (Using the generic request method from api.js)
-                // We assume POST /register accepts a JSON body
-                await Api.request("/register", "POST", {
-                    full_name: fullName,
-                    email: email,
-                    password: password
-                });
-
-                // 4. Success handling
-                alert("Account created successfully! Please log in.");
-                window.location.href = '/login';
-
-            } catch (error) {
-                // 5. Error handling
-                alert("Registration failed: " + error.message);
-                btn.innerHTML = originalText;
-                btn.disabled = false;
+            // Validate passwords match
+            if (password !== confirm) {
+                showModal("Passwords do not match. Please try again.");
+                return;
             }
+
+            // Show confirmation modal before creating account
+            showConfirmModal({
+                title: "Confirm Account Creation",
+                details: [
+                    { label: "Name",  value: fullName },
+                    { label: "Email", value: email },
+                ],
+                confirmText: "Create Account",
+                onConfirm: async () => {
+                    const originalText = btn.innerHTML;
+                    btn.innerHTML = `<div class="loader mr-2"></div> Creating...`;
+                    btn.disabled = true;
+
+                    try {
+                        await Api.request("/register", "POST", {
+                            full_name: fullName,
+                            email: email,
+                            password: password
+                        });
+
+                        showModal(
+                            "Account created successfully! Please log in.",
+                            'success',
+                            () => window.location.href = '/login'
+                        );
+
+                    } catch (error) {
+                        btn.innerHTML = originalText;
+                        btn.disabled = false;
+                    }
+                }
+            });
         });
     </script>
 </body>

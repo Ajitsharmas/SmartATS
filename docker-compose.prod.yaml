@@ -1,0 +1,72 @@
+# ---------------------------------------------------------------------------------------------------------------------------------------------
+# Purpose: Production Orchestration
+# ---------------------------------------------------------------------------------------------------------------------------------------------
+
+version: '3.8'
+
+services:
+  # 1. Nginx
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80" # Expose standard HTTP port
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - web
+  
+  # 2. The API (FastAPI)
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    env_file:
+      - .env
+    depends_on:
+      - db
+      - redis
+    restart: always
+  
+  # 3. The Celery worker
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    command: celery -A app.worker.celery_app worker --loglevel=info
+    env_file:
+      - .env
+    depends_on:
+      - redis
+      - db
+    restart: always
+  
+  # 4. The Postgres Database
+  db:
+    image: postgres:15
+    volumes:
+      - postgres_data_prod:/var/lib/postgresql/data
+    env_file:
+      - .env
+    restart: always
+  
+  # 5. The Redis Broker
+  redis:
+    image:  redis:7
+    restart: always
+  
+  # 6. MinIO S3 Storage
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data_prod:/data
+    env_file:
+      - .env
+    restart: always
+
+volumes:
+  postgres_data_prod:
+  minio_data_prod:
