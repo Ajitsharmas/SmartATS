@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Recruiter Dashboard - SmartATS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <style> body { font-family: 'Inter', sans-serif; } </style>
+</head>
+<body class="bg-slate-50 min-h-screen">
+
+    <nav class="bg-white border-b border-slate-200 shadow-sm px-8 h-16 flex justify-between items-center">
+        <div class="font-bold text-2xl text-indigo-600 tracking-tight">SmartATS</div>
+        <button onclick="localStorage.removeItem('access_token'); window.location.href='/login'" class="text-sm text-slate-500 hover:text-red-600">Logout</button>
+    </nav>
+
+    <main class="max-w-7xl mx-auto p-8 flex gap-8">
+        
+        <div class="w-1/3">
+            <div class="flex justify-between items-center mb-6">
+                <h2 class="text-xl font-bold text-slate-800">Your Jobs</h2>
+                <button onclick="document.getElementById('jobModal').classList.remove('hidden')" class="bg-indigo-600 text-white p-2 rounded-lg hover:bg-indigo-700"><i data-lucide="plus" class="w-5 h-5"></i></button>
+            </div>
+            <div id="jobsList" class="space-y-4">
+                <div class="text-slate-400 text-center py-4">Loading...</div>
+            </div>
+        </div>
+
+        <div class="w-2/3 bg-white rounded-xl shadow-sm border border-slate-200 p-6 min-h-[500px]">
+            <div id="emptyState" class="h-full flex flex-col items-center justify-center text-slate-400">
+                <i data-lucide="bar-chart-2" class="w-12 h-12 mb-2 opacity-50"></i>
+                <p>Select a job to view ranked applicants</p>
+            </div>
+
+            <div id="applicantView" class="hidden">
+                <div class="flex justify-between items-end mb-6 border-b border-slate-100 pb-4">
+                    <div>
+                        <h3 id="viewJobTitle" class="text-2xl font-bold text-slate-800">Job Title</h3>
+                        <p class="text-sm text-slate-500">Live AI Rankings</p>
+                    </div>
+                    <button onclick="refreshApplicants()" class="text-xs font-mono bg-slate-100 hover:bg-slate-200 px-3 py-1 rounded text-slate-600 transition cursor-pointer">
+                        ↻ Refresh
+                    </button>
+                </div>
+
+                <table class="w-full text-left">
+                    <thead>
+                        <tr class="text-xs font-semibold text-slate-400 uppercase tracking-wider border-b border-slate-100">
+                            <th class="pb-3 pl-2">Score</th>
+                            <th class="pb-3">Candidate</th>
+                            <th class="pb-3">Status</th>
+                            <th class="pb-3 text-right pr-2">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="applicantTable" class="divide-y divide-slate-50">
+                        </tbody>
+                </table>
+            </div>
+        </div>
+    </main>
+
+    <div id="jobModal" class="hidden fixed inset-0 bg-slate-900/50 flex items-center justify-center z-50">
+        <div class="bg-white p-6 rounded-lg w-96 shadow-2xl">
+            <h3 class="font-bold text-lg mb-4">Post New Job</h3>
+            <form id="jobForm" class="space-y-3">
+                <input name="title" placeholder="Job Title (min 5 chars)" class="w-full border p-2 rounded" required minlength="5">
+                <input name="description" placeholder="Description (min 10 chars)" class="w-full border p-2 rounded" required minlength="10">
+                <input name="skills" placeholder="Skills (comma sep)" class="w-full border p-2 rounded" required>
+                <input name="location" placeholder="Location" class="w-full border p-2 rounded" required>
+                <input name="salary_range" placeholder="Salary ($100k-$120k)" class="w-full border p-2 rounded" required>
+                <button type="submit" class="w-full bg-indigo-600 text-white py-2 rounded font-bold">Post</button>
+            </form>
+            <button onclick="document.getElementById('jobModal').classList.add('hidden')" class="w-full mt-2 text-slate-400 text-sm">Cancel</button>
+        </div>
+    </div>
+
+    <div id="atsModal" class="hidden fixed inset-0 bg-slate-900/50 flex items-center justify-center z-50 backdrop-blur-sm">
+        <div class="bg-white p-8 rounded-xl w-2/3 max-w-2xl shadow-2xl border border-slate-100">
+            <div class="flex justify-between items-start mb-6">
+                <div>
+                    <h2 id="atsName" class="text-2xl font-bold text-slate-800">Candidate Name</h2>
+                    <div class="mt-1 flex items-center space-x-2">
+                        <span id="atsScore" class="text-xl font-bold text-indigo-600">--/100</span>
+                        <span class="text-sm text-slate-400">AI Match Score</span>
+                    </div>
+                </div>
+                <button onclick="document.getElementById('atsModal').classList.add('hidden')" class="text-slate-400 hover:text-slate-600"><i data-lucide="x" class="w-6 h-6"></i></button>
+            </div>
+            
+            <div class="bg-slate-50 p-6 rounded-lg border border-slate-100 text-slate-700 leading-relaxed max-h-96 overflow-y-auto whitespace-pre-wrap font-mono text-sm" id="atsContent">
+                </div>
+            
+            <div class="mt-6 flex justify-end space-x-3">
+                <a id="downloadResume" href="#" target="_blank" class="px-4 py-2 bg-white border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 font-medium">Download Resume</a>
+                <button onclick="document.getElementById('AtsModal').classList.add('hidden')" class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/api.js"></script>
+    <script>
+        lucide.createIcons();
+        
+        let activeJobId = null;
+        let activeJobTitle = "";
+        
+        // CRITICAL: We store fetched applications here by ID
+        // This prevents HTML syntax errors when passing data to onclick
+        let applicationMap = {}; 
+
+        // 1. Load Jobs
+        async function loadJobs() {
+            try {
+                const jobs = await Api.getJobs();
+                const list = document.getElementById('jobsList');
+                list.innerHTML = jobs.map(job => `
+                    <div onclick="loadApplicants(${job.id}, '${job.title.replace(/'/g, "\\'")}')" 
+                         class="bg-white p-4 rounded-lg border border-slate-200 hover:border-indigo-500 cursor-pointer shadow-sm transition group">
+                        <h3 class="font-bold text-slate-800 group-hover:text-indigo-600">${job.title}</h3>
+                        <div class="text-xs text-slate-500 mt-1 flex justify-between">
+                            <span>${job.location}</span>
+                            <span>${job.salary_range}</span>
+                        </div>
+                    </div>
+                `).join('');
+                lucide.createIcons();
+            } catch (e) {
+                console.error(e);
+                // If 401, Api class handles redirect
+            }
+        }
+
+        // 2. Load Applicants
+        window.loadApplicants = async (jobId, jobTitle) => {
+            activeJobId = jobId;
+            activeJobTitle = jobTitle;
+            document.getElementById('emptyState').classList.add('hidden');
+            document.getElementById('applicantView').classList.remove('hidden');
+            document.getElementById('viewJobTitle').innerText = jobTitle;
+            
+            await refreshApplicants();
+        };
+
+        window.refreshApplicants = async () => {
+            if(!activeJobId) return;
+            
+            const tbody = document.getElementById('applicantTable');
+            tbody.innerHTML = '<tr><td colspan="4" class="text-center py-4 text-slate-400">Syncing...</td></tr>';
+
+            try {
+                const apps = await Api.getApplications(activeJobId);
+                
+                // Clear map
+                applicationMap = {};
+
+                if (apps.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" class="text-center py-8 text-slate-400">No applicants yet.</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = apps.map(app => {
+                    // Save to map (The Fix!)
+                    applicationMap[app.id] = app;
+
+                    // Color Coding
+                    let scoreClass = "bg-red-100 text-red-700";
+                    if(app.ai_score >= 80) scoreClass = "bg-emerald-100 text-emerald-700";
+                    else if(app.ai_score >= 50) scoreClass = "bg-amber-100 text-amber-700";
+
+                    return `
+                    <tr class="hover:bg-slate-50 transition group border-b border-slate-50">
+                        <td class="py-4 pl-2">
+                            <span class="font-bold text-sm px-2 py-1 rounded ${scoreClass}">${app.ai_score}</span>
+                        </td>
+                        <td class="py-4">
+                            <div class="font-bold text-slate-700">${app.candidate_name}</div>
+                            <div class="text-xs text-slate-400">${app.candidate_email}</div>
+                        </td>
+                        <td class="py-4">
+                            <span class="text-xs font-mono uppercase text-slate-500">${app.status}</span>
+                        </td>
+                        <td class="py-4 text-right pr-2">
+                            <button onclick="viewAts(${app.id})" class="text-indigo-600 hover:text-indigo-800 text-sm font-medium border border-indigo-200 px-3 py-1 rounded hover:bg-indigo-50 transition">
+                                View Analysis
+                            </button>
+                        </td>
+                    </tr>
+                `;
+                }).join('');
+            } catch (e) {
+                console.error(e);
+            }
+        };
+
+        // 3. View Ats (Safe Lookup)
+        window.viewAts = (appId) => {
+            // Retrieve object from memory, NOT from HTML
+            const app = applicationMap[appId];
+            
+            if(!app) return;
+
+            document.getElementById('atsName').innerText = app.candidate_name;
+            document.getElementById('atsScore').innerText = `${app.ai_score}/100`;
+            
+            // Handle newlines safely
+            document.getElementById('atsContent').textContent = app.ai_critique || "Analysis pending...";
+            
+            document.getElementById('downloadResume').href = app.resume_url;
+            document.getElementById('atsModal').classList.remove('hidden');
+        };
+
+        // Init
+        loadJobs();
+        
+        // Post Job Handler
+        document.getElementById('jobForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const fd = new FormData(e.target);
+            try {
+                await Api.postJob(Object.fromEntries(fd));
+                document.getElementById('jobModal').classList.add('hidden');
+                loadJobs();
+                e.target.reset();
+            } catch(err) {
+                alert(err.message);
+            }
+        });
+    </script>
+</body>
+</html>

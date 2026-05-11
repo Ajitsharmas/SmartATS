@@ -1,29 +1,37 @@
-# ----------------------------------------------------------------------------------------------------
-# Purpose: The entry point of  ATS endpoint
-# Author: Ajit Sharma S
-# ----------------------------------------------------------------------------------------------------
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
-from sqlmodel import Session, select
-from typing import Annotated, List
-from contextlib import asynccontextmanager
+# ---------------------------------------------------------------------------
+# Purpose: The Entry Point for the SmartATS API
+# ---------------------------------------------------------------------------
+
+import io
 import uuid
+from contextlib import asynccontextmanager
+from typing import Annotated, List
+
 import pypdf
-import io 
+
+# Background Task Imports
+from celery.result import AsyncResult  # To check status
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from sqlmodel import Session, select
+
+from app.ai import AIProvider, get_ai_provider
+from app.auth import auth_router, get_current_user
+from app.config import settings
 
 # Import our local modules
 from app.database import create_db_and_tables, get_session
-from app.models import JobListing, AnalysisRequest, User
-from app.ai import get_ai_provider, AIProvider
-from app.utils import init_storage, get_s3_client
-# Import the tasd to trigger it, and the app instance to check results.
+
+# CRITICAL: We import ApplicationSubmit here to handle the full frontend payload
+from app.models import AnalysisRequest, Application, ApplicationSubmit, JobListing, User
+from app.utils import get_s3_client, init_storage
 from app.worker import analyze_resume_task, celery_app
-from celery.result import AsyncResult
-from app.config import settings
-# Security related imports
-from app.auth import auth_router, get_current_user # Import the router and dependency
-# 1. Lifespan Context Manager
-# This runs code before the app starts and after it shuts down.
-# We use it to create our database tables automatically on startup.
+
+
+# 1. LIFESPAN CONTEXT MANAGER
+# This is the "Startup Sequence" of our application.
+# Before the first user connects, we ensure the DB tables exist and MinIO is ready.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Startup: Creating database tables...")
@@ -33,134 +41,156 @@ async def lifespan(app: FastAPI):
     yield
     print("Shutdown: Cleaning up resources...")
 
+
 app = FastAPI(
-    title = "ATS",
-    description = "An AI powered Applicant Tracking System (ATS)",
-    version = "1.0.0",
-    lifespan=lifespan
+    title="SmartATS",
+    description="An AI-Powered Applicant Tracking System (ATS)",
+    version="1.0.0",
+    lifespan=lifespan,
 )
 
-# 2. Register the Auth Router
-# This adds /token and /register to our API
+# 2. MOUNT STATIC FILES
+# This tells FastAPI: "If a user asks for /static/css/style.css, look in the app/static folder."
+# This effectively turns our API into a Web Server for the frontend files.
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+
+# 3. PAGE ROUTES (Serving HTML)
+# These endpoints just return the raw HTML files.
+# The JavaScript inside those files will call our JSON APIs later.
+@app.get("/")
+async def read_root():
+    return FileResponse("app/static/index.html")
+
+
+@app.get("/dashboard")
+async def read_dashboard():
+    return FileResponse("app/static/dashboard.html")
+
+
+@app.get("/login")
+async def read_login():
+    return FileResponse("app/static/login.html")
+
+
+@app.get("/register")
+async def read_register():
+    return FileResponse("app/static/register.html")
+
+
+# --- 4. REGISTER MODULES ---
+# We attach the Auth routes (/token, /register) defined in auth.py
 app.include_router(auth_router)
 
-# 2 Define a Dependency Injection type alias
-# This makes our path operations cleaner.
+
+# 5. DEPENDENCY INJECTION CONFIGURATION
+# This makes our path operations cleaner and easier to test.
 SessionDep = Annotated[Session, Depends(get_session)]
 
-#AI Dependency
-# This injects the correct AI class based on our settings(Gemini or LLama)
+# AI Dependency: Injects the correct AI class based on settings (Gemini/Llama)
 AIDep = Annotated[AIProvider, Depends(get_ai_provider)]
 
 
 @app.get("/health")
 async def health_check():
-    """
-    A simple heartbeat endpoint to verify the service is up.
-    """
-    return {"status": "ok", "message": "ATS is ready to serve!"}
+    return {"status": "ok", "message": "SmartATS is ready to serve 🚀"}
 
-# ----------------------------JOB ROUTES------------------------------------------
 
-# 3. Create a Job (POST)
-# If user is not logged in, this fuction will NEVER run.
+# --- JOB ROUTES ---
+
+
+# Create a Job (POST)
+# SECURITY: Notice 'current_user' dependency.
+# If the user does not have a valid Token, FastAPI rejects this request (401).
 @app.post("/jobs", response_model=JobListing)
-def create_job(job: JobListing,
-               session: SessionDep,
-               current_user: Annotated[User, Depends(get_current_user)]):
+def create_job(
+    job: JobListing,
+    session: SessionDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
     """
-    Create a new Job Listing (Registered Recruiters only)
+    Create a new Job Listing (Protected: Recruiters Only).
     """
-
-    session.add(job)        # Add to Session, ready to Save to DB
-    session.commit()        # Save to DB
-    session.refresh(job)    # get new ID from DB
+    session.add(job)  # Add to the "Shopping Cart"
+    session.commit()  # Checkout (Save to DB)
+    session.refresh(job)  # Get the new ID from the DB
     return job
 
 
-# 4. List all Jobs (GET)
+# List all Jobs (GET)
+# PUBLIC: No 'current_user' dependency here. Anyone can view jobs.
 @app.get("/jobs", response_model=List[JobListing])
 def list_jobs(session: SessionDep):
     """
-    Retrieve all open job positions
+    Retrieve all open job positions.
     """
-
-    # Write the query: "SELECT * FROM joblisting"
     statement = select(JobListing)
     jobs = session.exec(statement).all()
     return jobs
 
 
-# 5. ------------------------------------------------AI Analysis Routes-------------------------------------------------------------
+# --- AI ANALYSIS ROUTES (Direct Test) ---
 @app.post("/analyze")
 async def analyze_resume_text(request: AnalysisRequest, ai: AIDep):
     """
-    Sends raw text to the configured AI provider.
-    Enforces a strict JSON output ormat (Score + Critique) to match the PRD Requirements.
+    Direct endpoint to test AI output without saving to DB.
+    Useful for debugging the LLM prompt.
     """
-
-    # We craft a specific prompt to forcre the AI into an engineering mindset.
-    # We explicitly ask for JSON so we can parse it programatically later.
-
     prompt = f"""
     You are an expert tech recruiter. Analyze the following resume text against a generic Senior Developer role.
-
+    
     Return your response in this exact JSON format:
     {{
-        "score": (interger 0-100),
-        "critique": (string, concise summary of gasps and strengths)
+        "score": (integer 0-100),
+        "critique": (string, concise summary of gaps and strengths)
     }}
-
+    
     Resume Text:
     {request.text}
     """
-
-    # We await. the result. The Event loop is free to handle other requests while waiting.
     analysis = await ai.analyze_text(prompt)
-
     return {"analysis": analysis}
 
 
-# -------------------------------File Upload Router---------------------------------------------
+# --- FILE UPLOAD ROUTES ---
 @app.post("/upload")
 async def upload_resume(
-    current_user: Annotated[User, Depends(get_current_user)], # Required Arguments need to come before Default Arguments always
-    file: UploadFile = File(...)
+    # REMOVED: current_user dependency.
+    # Candidates are anonymous users. We must allow them to upload without login.
+    file: UploadFile = File(...),
 ):
     """
-    Accepts a temporary file, validates it, extracts text, and saves to minIO
+    Accepts a PDF file, validates it, extracts text, and saves to MinIO.
+    PUBLIC ENDPOINT (No Auth Required)
     """
-    # 1. Validation: Check File Extension 
+
+    # 1. Validation: Check File Extension
     if file.content_type != "application/pdf":
-        raise HTTPException(status_code=400, detail="Invalid file type. Only PDFs are allowed.")
-    
-    # 2. Validation: Magic Numbners (The Real Security Check)
-    # Read the first 4 bytes to verify it's a true PDF header (%PDF)
+        raise HTTPException(
+            status_code=400, detail="Invalid file type. Only PDFs are allowed."
+        )
+
+    # 2. Validation: Magic Numbers (Check file signature)
     header = await file.read(4)
     if header != b"%PDF":
         raise HTTPException(status_code=400, detail="Corrupt or invalid PDF file.")
 
-    # CRITICAL: Reset the cursor
-    # We just read 4 bytes. If we don't rewind, the PDF reader will start reading from byte 5 and fail.
+    # CRITICAL: Reset cursor so we can read the file again
     await file.seek(0)
 
-    # 3. Read the content for processing
-    # In a perfect world, we should stream this. But pypdf requires file in memory.
-    # Since resumes are small (< 5MB), reading to RAM is acceptable here.
+    # 3. Read content into memory
     content = await file.read()
 
-    # 4. Text Extraction (The Intelligence)
+    # 4. Text Extraction (For the AI)
     try:
-        # We wrap the raw bytes in BytesIO so pypdf thinks it's a real file
         pdf_reader = pypdf.PdfReader(io.BytesIO(content))
-        extracted_text=""
+        extracted_text = ""
         for page in pdf_reader.pages:
             extracted_text += page.extract_text() or ""
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to extract teext: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to extract text: {str(e)}")
 
-    
-    # 5. Generate uniqure Key (The Storage Strategy)
+    # 5. Generate Unique Key (Prevent filename collisions)
     file_id = str(uuid.uuid4())
     s3_key = f"{file_id}.pdf"
 
@@ -171,75 +201,96 @@ async def upload_resume(
             Bucket=settings.MINIO_BUCKET_NAME,
             Key=s3_key,
             Body=content,
-            ContentType="application/pdf"
+            ContentType="application/pdf",
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Storage Error: {str(e)}")
-    
+
     # 7. Return Metadata
+    # We return the MinIO URL so the frontend can display a "Download" link.
+    file_url = f"{settings.MINIO_ENDPOINT}/{settings.MINIO_BUCKET_NAME}/{s3_key}"
+
     return {
         "file_id": file_id,
         "filename": file.filename,
         "s3_key": s3_key,
-        "extracted_text_preview": extracted_text[:200] + "..." # Peek at thje result
+        "extracted_text_preview": extracted_text[:200] + "...",
+        "file_url": file_url,  # Needed for the frontend!
     }
 
 
-#------------------------------------------Async AI Routes (Fire and forget Pattern)--------------------------------------------------------
-@app.post("/analyze_async")
-async def analyze_resume_async(
-    request: AnalysisRequest,
-    current_user: Annotated[User, Depends(get_current_user)]
+# --- APPLICATION ROUTES ---
+@app.get("/applications/{job_id}", response_model=List[Application])
+def get_applications(
+    job_id: int,
+    session: SessionDep,
+    current_user: Annotated[User, Depends(get_current_user)],
 ):
     """
-    Triggers a background AI analysis.
-    Returns a Task ID instantly. Does NOT wait for the AI to finish. 
+    Recruiter Dashboard: View all applicants for a specific job.
+    Returns the list sorted by 'ai_score' so the best candidates appear first.
+    """
+    statement = (
+        select(Application)
+        .where(Application.job_id == job_id)
+        .order_by(Application.ai_score.desc())
+    )
+    results = session.exec(statement).all()
+    return results
+
+
+# --- Processing ROUTES (The Main Workflow) ---
+@app.post("/process")
+async def process_resume(payload: ApplicationSubmit, session: SessionDep):
+    """
+    The Orchestrator Endpoint.
+    1. Receives the full application package (Job ID + Candidate + Resume Text).
+    2. SAVES the application to Postgres immediately (Status: Pending).
+    3. DISPATCHES the AI task to the Celery Worker.
     """
 
-    # 1. Push the Task to Redis
-    # .delay() is the magic method. It serializes the function call
-    # and sends it to the Message Brojker.
-    task = analyze_resume_task.delay(request.text)
+    # A. Create Record in Postgres
+    # We save *before* we process. This ensures we don't lose the application
+    # even if the AI worker crashes.
+    app_record = Application(
+        job_id=payload.job_id,
+        candidate_name=payload.candidate_name,
+        candidate_email=payload.candidate_email,
+        resume_url=payload.resume_url,
+        status="pending",
+    )
+    session.add(app_record)
+    session.commit()
+    session.refresh(app_record)
 
-    # 2. Return the Ticket (Task ID) immediately
-    # We use status_code=202 (Acceepted) to indicate processing has started but not finished.
+    # B. Trigger Worker
+    # CRITICAL: We pass the 'application_id' (app_record.id) to the worker.
+    # This allows the worker to "call us back" (update the DB) when it finishes.
+    task = analyze_resume_task.delay(
+        text_content=payload.request.text, application_id=app_record.id
+    )
+
     return {
-        "message": "Resume accepted for processing. ",
+        "message": "Application received",
         "task_id": task.id,
-        "status_url": f"/analyze_async/{task.id}"
+        "application_id": app_record.id,
     }
 
-# Check status of resume processing task
-@app.get("/analyze_async/{task_id}")
-async def get_analyze_resume_async_status(task_id: str):
+
+@app.get("/process/{task_id}")
+async def get_processing_status(task_id: str):
     """
     Polls the status of a background task.
-    Clients should call this every few seconds until status is 'Done'.
+    Used by the frontend to show progress bars.
     """
-
-    # 1. Fetch the Task Metadata from Redis
-    # AsyncResult looks up the task_id in the Result Backend.
+    # 1. Fetch the result from Redis Backend
     task_result = AsyncResult(task_id, app=celery_app)
-
-    # 2. Check the Lifecycle State
+    # 2. Check State
     if task_result.state == "PENDING":
-        return {
-            "status": "Processing",
-            "result": None
-        }
+        return {"status": "Processing...", "result": None}
     elif task_result.state == "SUCCESS":
-        # The worker finished successfully. The restuirn value is in .result
-        return {
-            "status": "Done",
-            "result": task_result.result
-        }
+        return {"status": "Done", "result": task_result.result}
     elif task_result.state == "FAILURE":
-        # The worker crashed (e.g. AI API Error). The exception is in .result
-        return {
-            "status": "Failed",
-            "error": str(task_result.result)
-        }
-    
-    # Catch-all for other states like "RETRY" and "STARTED"
+        return {"status": "Failed", "error": str(task_result.result)}
+
     return {"status": task_result.state}
-        

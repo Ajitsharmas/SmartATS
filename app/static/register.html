@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Create Account - SmartATS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+
+<body class="bg-slate-50 h-screen flex items-center justify-center font-sans">
+
+    <div class="bg-white p-8 rounded-xl shadow-lg w-full max-w-md fade-in border border-slate-100">
+
+        <div class="text-center mb-8">
+            <div class="flex justify-center mb-2">
+                <i data-lucide="user-plus" class="w-10 h-10 text-indigo-600"></i>
+            </div>
+            <h1 class="text-3xl font-bold text-slate-800 mb-2">Join SmartATS</h1>
+            <p class="text-slate-500 text-sm">Create a recruiter account to start hiring.</p>
+        </div>
+
+        <form id="registerForm" class="space-y-5">
+
+            <div>
+                <label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Full Name</label>
+                <div class="relative">
+                    <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                        <i data-lucide="smile" class="h-5 w-5 text-slate-400"></i>
+                    </div>
+                    <input type="text" id="fullName" required placeholder="e.g. Sarah Connor"
+                        class="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition text-slate-800">
+                </div>
+            </div>
+
+            <div>
+                <label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Email Address</label>
+                <div class="relative">
+                    <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                        <i data-lucide="mail" class="h-5 w-5 text-slate-400"></i>
+                    </div>
+                    <input type="email" id="email" required placeholder="name@company.com"
+                        class="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition text-slate-800">
+                </div>
+            </div>
+
+            <div>
+                <label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1">Password</label>
+                <div class="relative">
+                    <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                        <i data-lucide="lock" class="h-5 w-5 text-slate-400"></i>
+                    </div>
+                    <input type="password" id="password" required placeholder="••••••••" minlength="4"
+                        class="w-full pl-10 pr-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition text-slate-800">
+                </div>
+                <p class="text-xs text-slate-400 mt-1 text-right">Must be at least 4 characters</p>
+            </div>
+
+            <button type="submit"
+                class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-lg shadow-sm hover:shadow-md transition duration-200 flex justify-center items-center">
+                <span>Create Account</span>
+                <i data-lucide="arrow-right" class="w-4 h-4 ml-2"></i>
+            </button>
+        </form>
+
+        <div class="mt-6 text-center text-sm text-slate-500">
+            Already have an account?
+            <a href="/login" class="text-indigo-600 hover:text-indigo-800 font-bold hover:underline">Log in here</a>
+        </div>
+
+        <div class="mt-8 pt-6 border-t border-slate-100 text-center text-xs text-slate-400">
+        </div>
+    </div>
+
+    <script src="/static/js/api.js"></script>
+    <script>
+        lucide.createIcons();
+
+        document.getElementById('registerForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            // 1. Gather Data
+            const fullName = document.getElementById('fullName').value;
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            const btn = e.target.querySelector('button');
+
+            // 2. Loading State
+            const originalText = btn.innerHTML;
+            btn.innerHTML = `<div class="loader mr-2"></div> Creating...`;
+            btn.disabled = true;
+
+            try {
+                // 3. Call API (Using the generic request method from api.js)
+                // We assume POST /register accepts a JSON body
+                await Api.request("/register", "POST", {
+                    full_name: fullName,
+                    email: email,
+                    password: password
+                });
+
+                // 4. Success handling
+                alert("Account created successfully! Please log in.");
+                window.location.href = '/login';
+
+            } catch (error) {
+                // 5. Error handling
+                alert("Registration failed: " + error.message);
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+            }
+        });
+    </script>
+</body>
+
+</html>

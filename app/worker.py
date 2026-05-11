@@ -1,54 +1,106 @@
-# ------------------------------------------------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Purpose: Celery Worker Configuration and Task Definitions
-# ------------------------------------------------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+import asyncio
+import json
 
 from celery import Celery
-import asyncio
-from app.config import settings
+from sqlmodel import Session
+
 from app.ai import get_ai_provider
 
-# 1. Initialize the Celery App
-# We name it 'smartats_worker' and pass the broker connection string
+# Local Imports
+from app.config import settings
+from app.database import engine  # Needed to open a DB connection
+from app.models import Application  # Needed to update the row
+
+# 1. Initialize Celery
+# We connect to Redis (Broker) to get tasks and Redis (Backend) to store results.
 celery_app = Celery(
     "smartats_worker",
     broker=settings.CELERY_BROKER_URL,
     backend=settings.CELERY_RESULT_BACKEND,
 )
 
-# 2. Configure Celery
-# We tell it to serialize data using JSON, which is standard and safe.
+# 2. Configure Security & Serialization
+# We strictly enforce JSON to prevent code execution attacks (pickle).
 celery_app.conf.update(
-    task_serializer = "json",
+    task_serializer="json",
     accept_content=["json"],
     result_serializer="json",
     timezone="UTC",
     enable_utc=True,
 )
 
-# 3. Define the Task
-# The @celery_app.task decorator turns this function into a background job.
-@celery_app.task(name="analyze_resume_task")
-def analyze_resume_task(text_content: str) -> dict:
-    """
-    Background task to perform AI analysis on resume text.
-    This function runs in a separate process (Worker), not the API.
-    """
-    print(f"Worker: Received text pf length {len(text_content)}. Starting analysis...")
 
-    # We need to run the Async AI logic inside this Sync wrapper.
+@celery_app.task(name="analyze_resume_task")
+def analyze_resume_task(text_content: str, application_id: int) -> dict:
+    """
+    The "Brain" of the operation.
+    1. Analyzes the text using AI.
+    2. Writes the result back to the Postgres Database.
+    """
+    print(f"Worker: Processing App ID {application_id}...")
+
     try:
-        # Get the configured provider (Gemini or Llama)
+        # A. Run AI Analysis
         ai_provider = get_ai_provider()
 
-        prompt = f"You are an expert tech recruiter. Critique the following resume text. Be concise. Resume: {text_content}"
+        # We craft a "System Prompt" that forces the AI to be a computer program
+        # rather than a chat bot. We need strict JSON for our code to work.
+        prompt = f"""
+        You are an expert tech recruiter. Analyze the resume below.
+        Return a strict JSON response:
+        {{
+            "score": (integer 0-100),
+            "critique": (string summary)
+        }}
+        Resume: {text_content[:3000]}
+        """
 
-        # Execute the asynnc function synchronously
-        # This blocks he WORKER, but that's okay (it doesn't block the API)
-        response =  asyncio.run(ai_provider.analyze_text(prompt))
+        # THE SYNC/ASYNC BRIDGE
+        # Celery workers are synchronous by default. Our AI Provider is asynchronous.
+        # asyncio.run() creates a temporary event loop just for this one function call.
 
-        print("Worker: Analysis complete.")
-        return {"status": "comleted", "critique": response}
+        raw_response = asyncio.run(ai_provider.analyze_text(prompt))
+
+        # B. Parse AI Response (The "Sanitization" Step)
+        # LLMs often wrap JSON in Markdown code blocks (```json ... ```).
+        # We must strip these out before parsing, or the worker will crash.
+        cleaned_response = (
+            raw_response.replace("```json", "").replace("```", "").strip()
+        )
+        analysis_data = json.loads(cleaned_response)
+
+        # Extract data with safety defaults
+        score = analysis_data.get("score", 0)
+        critique = analysis_data.get("critique", "No critique provided.")
+
+        # C. Update Database (The Feedback Loop)
+        # This is what turns "Pending" into "Processed" on the Dashboard.
+        with Session(engine) as session:
+            # 1. Fetch the application by ID
+            app_record = session.get(Application, application_id)
+
+            if app_record:
+                # 2. Update the empty fields
+                app_record.ai_score = score
+                app_record.ai_critique = critique
+                app_record.status = "processed"
+
+                # 3. Commit the changes to Postgres
+                session.add(app_record)
+                session.commit()
+                print(f"Worker: Database updated for App ID {application_id}")
+            else:
+                print(f"Worker: Error - App ID {application_id} not found!")
+
+        return {"status": "success", "score": score}
+
     except Exception as e:
         print(f"Worker Error: {str(e)}")
-        return {"status": "failed", "error": str(e)}
+        # In a real production app, we would update the DB status to 'failed' here.
+        return {"status": "error", "message": str(e)}
+
 
