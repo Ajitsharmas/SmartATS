@@ -85,6 +85,13 @@ class User(UserBase, table=True):
     hashed_password: str
     created_at: datetime = Field(default_factory=datetime.now)
 
+    # Email verification
+    is_verified: bool = Field(default=False)
+    verification_token: str | None = Field(default=None)
+
+    # Password reset
+    reset_token: str | None = Field(default=None)
+
 
 class UserCreate(UserBase):
     """

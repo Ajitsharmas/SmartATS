@@ -12,7 +12,10 @@
 
     <nav class="bg-white border-b border-slate-200 shadow-sm px-8 h-16 flex justify-between items-center">
         <div class="font-bold text-2xl text-indigo-600 tracking-tight">SmartATS</div>
-        <button onclick="localStorage.removeItem('access_token'); window.location.href='/login'" class="text-sm text-slate-500 hover:text-red-600">Logout</button>
+        <div class="flex items-center gap-4">
+            <button id="changePasswordBtn" class="text-sm text-slate-500 hover:text-indigo-600 transition">Change Password</button>
+            <button onclick="localStorage.removeItem('access_token'); window.location.href='/login'" class="text-sm text-slate-500 hover:text-red-600">Logout</button>
+        </div>
     </nav>
 
     <main class="max-w-7xl mx-auto p-8 flex gap-8">
@@ -266,6 +269,39 @@
             document.getElementById('downloadResume').href = app.resume_url;
             document.getElementById('atsModal').classList.remove('hidden');
         };
+
+        // Change Password
+        document.getElementById('changePasswordBtn').addEventListener('click', () => {
+            const token = Api.getToken();
+            let email = '';
+            if (token) {
+                try { email = JSON.parse(atob(token.split('.')[1])).sub || ''; } catch (_) {}
+            }
+
+            showConfirmModal({
+                title: 'Change Password',
+                details: [{ label: 'Email', value: email || 'your account email' }],
+                confirmText: 'Send Reset Link',
+                note: 'A password reset link will be sent to your email address.',
+                onConfirm: async () => {
+                    if (!email) {
+                        showModal('Could not determine your email. Please log out and use Forgot Password on the login page.');
+                        return;
+                    }
+                    try {
+                        const res = await fetch('/forgot-password', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ email }),
+                        });
+                        const data = await res.json();
+                        showModal(data.message || 'Reset link sent. Please check your inbox.', 'success');
+                    } catch (_) {
+                        showModal('Something went wrong. Please try again.');
+                    }
+                },
+            });
+        });
 
         // Init
         loadJobs();

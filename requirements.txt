@@ -8,6 +8,7 @@ argon2-cffi
 python-jose[cryptography]
 google-genai
 google-api-core
+resend
 httpx
 minio
 pypdf

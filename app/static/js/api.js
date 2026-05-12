@@ -176,7 +176,6 @@ class Api {
 
     static async login(username, password) {
         // OAuth2 Standard requires data to be sent as "x-www-form-urlencoded"
-        // NOT as JSON. This is why we use URLSearchParams instead of JSON.stringify.
         const formData = new URLSearchParams();
         formData.append("username", username);
         formData.append("password", password);
@@ -187,7 +186,12 @@ class Api {
             body: formData,
         });
 
-        if (!response.ok) throw new Error("Invalid Credentials");
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            const err = new Error(data.detail || "Invalid email or password.");
+            err.code = data.detail;  // pass the backend error code through
+            throw err;
+        }
         return await response.json();
     }
 

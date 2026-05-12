@@ -57,9 +57,13 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       DATABASE_URL: postgresql://resume_user:resume_pass@db:5432/resume_db
       MINIO_ENDPOINT: http://minio:9000
-      # AI COnfigs
+      # AI configs
       AI_MODE: gemini
       GEMINI_API_KEY: ${GEMINI_API_KEY}
+      # Email configs
+      RESEND_API_KEY: ${RESEND_API_KEY}
+      FROM_EMAIL: ${FROM_EMAIL}
+      APP_BASE_URL: ${APP_BASE_URL}
     depends_on:
     - redis
     - db

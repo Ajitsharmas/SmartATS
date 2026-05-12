@@ -82,6 +82,16 @@ async def read_register():
     return FileResponse("app/static/register.html", headers=_NO_CACHE)
 
 
+@app.get("/verify-email")
+async def read_verify_email():
+    return FileResponse("app/static/verify-email.html", headers=_NO_CACHE)
+
+
+@app.get("/reset-password")
+async def read_reset_password():
+    return FileResponse("app/static/reset-password.html", headers=_NO_CACHE)
+
+
 # --- 4. REGISTER MODULES ---
 # We attach the Auth routes (/token, /register) defined in auth.py
 app.include_router(auth_router)

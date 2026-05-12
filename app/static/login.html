@@ -28,6 +28,12 @@
                 <label class="block text-sm font-medium text-slate-700 mb-1">Password</label>
                 <input type="password" id="password" required
                     class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition">
+                <div class="text-right mt-1">
+                    <button type="button" id="forgotPasswordBtn"
+                        class="text-xs text-indigo-500 hover:text-indigo-700 font-medium">
+                        Forgot password?
+                    </button>
+                </div>
             </div>
 
             <button type="submit"
@@ -36,30 +42,115 @@
             </button>
         </form>
 
+        <!-- Unverified email notice (hidden by default) -->
+        <div id="verificationNotice" class="hidden mt-4 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3">
+            <p class="text-sm text-amber-800 font-medium mb-1">Your email is not verified yet.</p>
+            <p class="text-xs text-amber-700 mb-3">Please check your inbox for the verification link.</p>
+            <button id="resendBtn"
+                class="text-xs font-semibold bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300 px-3 py-1.5 rounded transition">
+                Resend Verification Email
+            </button>
+        </div>
+
         <div class="mt-6 text-center text-sm text-slate-500">
             Don't have an account?
             <a href="/register" class="text-indigo-600 hover:text-indigo-800 font-medium">Create one</a>
         </div>
 
-        <div class="mt-8 pt-6 border-t border-slate-100 text-center text-xs text-slate-400">
-        </div>
+        <div class="mt-8 pt-6 border-t border-slate-100 text-center text-xs text-slate-400"></div>
     </div>
 
     <script src="/static/js/api.js"></script>
     <script>
+        let lastAttemptedEmail = '';
+
         document.getElementById('loginForm').addEventListener('submit', async (e) => {
             e.preventDefault();
-            const email = document.getElementById('email').value;
+            const email    = document.getElementById('email').value;
             const password = document.getElementById('password').value;
+
+            document.getElementById('verificationNotice').classList.add('hidden');
+            lastAttemptedEmail = email;
 
             try {
                 const data = await Api.login(email, password);
                 Api.setToken(data.access_token);
                 window.location.href = '/dashboard';
             } catch (error) {
-                showModal(error.message || "Invalid email or password.");
+                if (error.code === 'EMAIL_NOT_VERIFIED') {
+                    document.getElementById('verificationNotice').classList.remove('hidden');
+                } else {
+                    showModal(error.message || "Invalid email or password.");
+                }
             }
         });
+
+        document.getElementById('resendBtn').addEventListener('click', async () => {
+            const btn = document.getElementById('resendBtn');
+            btn.textContent = 'Sending...';
+            btn.disabled = true;
+
+            try {
+                await Api.request('/resend-verification', 'POST', { email: lastAttemptedEmail });
+                showModal('Verification email sent. Please check your inbox.', 'success');
+            } catch (_) {
+                // error modal shown by Api.request
+            } finally {
+                btn.textContent = 'Resend Verification Email';
+                btn.disabled = false;
+            }
+        });
+
+        document.getElementById('forgotPasswordBtn').addEventListener('click', () => {
+            const email = document.getElementById('email').value.trim();
+            showForgotPasswordModal(email);
+        });
+
+        function showForgotPasswordModal(prefillEmail) {
+            const existing = document.getElementById('_forgotModal');
+            if (existing) existing.remove();
+
+            const modal = document.createElement('div');
+            modal.id = '_forgotModal';
+            modal.innerHTML = `
+                <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+                    <div class="bg-white rounded-xl shadow-2xl max-w-sm w-full mx-4 p-6">
+                        <h3 class="font-bold text-slate-800 text-lg mb-2">Reset Password</h3>
+                        <p class="text-sm text-slate-500 mb-4">Enter your email and we'll send you a reset link.</p>
+                        <input type="email" id="_forgotEmail" value="${escapeHtml(prefillEmail)}" placeholder="name@company.com"
+                            class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition mb-4">
+                        <div class="flex gap-3">
+                            <button id="_forgotCancel" class="flex-1 py-2 border border-slate-300 text-slate-700 rounded-lg font-medium hover:bg-slate-50 transition">Cancel</button>
+                            <button id="_forgotSubmit" class="flex-1 py-2 bg-indigo-600 text-white rounded-lg font-bold hover:bg-indigo-700 transition">Send Link</button>
+                        </div>
+                    </div>
+                </div>`;
+            document.body.appendChild(modal);
+
+            document.getElementById('_forgotCancel').addEventListener('click', () => modal.remove());
+            document.getElementById('_forgotSubmit').addEventListener('click', async () => {
+                const emailVal = document.getElementById('_forgotEmail').value.trim();
+                if (!emailVal) return;
+
+                const btn = document.getElementById('_forgotSubmit');
+                btn.textContent = 'Sending...';
+                btn.disabled = true;
+
+                try {
+                    const res = await fetch('/forgot-password', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email: emailVal }),
+                    });
+                    const data = await res.json();
+                    modal.remove();
+                    showModal(data.message || 'If that email is registered, a reset link has been sent.', 'success');
+                } catch (_) {
+                    modal.remove();
+                    showModal('Something went wrong. Please try again.');
+                }
+            });
+        }
     </script>
 </body>
 

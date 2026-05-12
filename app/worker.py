@@ -13,6 +13,7 @@ from sqlmodel import Session
 from app.ai import get_ai_provider, GeminiUnavailableError
 from app.config import settings
 from app.database import engine
+from app.email import send_application_scored_email
 from app.models import Application, JobListing
 from app.utils import get_s3_client
 
@@ -37,7 +38,7 @@ celery_app.conf.update(
 # Shared helper — runs AI analysis and writes the result back to the DB.
 # Called by both analyze_resume_task and rescore_application_task.
 # ---------------------------------------------------------------------------
-def _analyze_and_save(text_content: str, application_id: int) -> dict:
+def _analyze_and_save(text_content: str, application_id: int, is_rescore: bool = False) -> dict:
     # Fetch the job this application belongs to so scoring is role-specific
     with Session(engine) as session:
         app_record = session.get(Application, application_id)
@@ -84,17 +85,28 @@ def _analyze_and_save(text_content: str, application_id: int) -> dict:
     score = analysis_data.get("score", 0)
     critique = analysis_data.get("critique", "No critique provided.")
 
+    candidate_email = None
+    candidate_name = None
+
     with Session(engine) as session:
         app_record = session.get(Application, application_id)
         if app_record:
             app_record.ai_score = score
             app_record.ai_critique = critique
             app_record.status = "processed"
+            candidate_email = app_record.candidate_email
+            candidate_name = app_record.candidate_name
             session.add(app_record)
             session.commit()
             print(f"Worker: Database updated for App ID {application_id}")
         else:
             print(f"Worker: Error - App ID {application_id} not found!")
+
+    if candidate_email:
+        try:
+            send_application_scored_email(candidate_email, candidate_name, job_title, is_rescore=is_rescore)
+        except Exception as e:
+            print(f"Worker: Failed to send scored email to {candidate_email}: {e}")
 
     return {"status": "success", "score": score}
 
@@ -149,7 +161,7 @@ def rescore_application_task(application_id: int) -> dict:
         text_content = "".join(page.extract_text() or "" for page in pdf_reader.pages)
 
         # D. Re-run AI analysis and save
-        return _analyze_and_save(text_content, application_id)
+        return _analyze_and_save(text_content, application_id, is_rescore=True)
 
     except Exception as e:
         print(f"Worker Error (rescore App {application_id}): {str(e)}")

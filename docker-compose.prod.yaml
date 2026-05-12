@@ -48,6 +48,12 @@ services:
     env_file:
       - .env
     restart: always
+    # DEMO ONLY: exposes Postgres on the host so DBeaver can connect at localhost:5432.
+    # In a real production environment, remove this ports block entirely —
+    # the database should only be reachable by other containers on the internal
+    # Docker network, never directly from the outside world.
+    ports:
+      - "5432:5432"
   
   # 5. The Redis Broker
   redis:

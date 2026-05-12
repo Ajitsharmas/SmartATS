@@ -40,7 +40,12 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "79f0da0c3f80646ad690a44e39706380c40d0d777f5df57ad531c218f86bb270"
     ALGORITHM: str ="HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
-    
+
+    # Email Config (Resend)
+    RESEND_API_KEY: str = "re_fake_key_for_dev"
+    FROM_EMAIL: str = "SmartATS <onboarding@resend.dev>"
+    APP_BASE_URL: str = "http://localhost:8000"
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 # Initialize settings

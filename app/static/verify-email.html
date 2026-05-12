@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Verify Email - SmartATS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body class="bg-slate-50 min-h-screen flex items-center justify-center">
+
+    <div class="bg-white p-8 rounded-xl shadow-lg w-full max-w-md fade-in border border-slate-100 text-center">
+
+        <h1 class="text-3xl font-bold text-indigo-600 mb-1">SmartATS</h1>
+        <p class="text-slate-500 text-sm mb-8">Email Verification</p>
+
+        <!-- Loading -->
+        <div id="stateLoading">
+            <div class="flex justify-center mb-5">
+                <div class="loader" style="width:36px;height:36px;border-width:4px;"></div>
+            </div>
+            <p class="text-slate-600 font-medium">Verifying your email address…</p>
+            <p class="text-slate-400 text-sm mt-1">This will only take a moment.</p>
+        </div>
+
+        <!-- Success -->
+        <div id="stateSuccess" class="hidden">
+            <div class="flex justify-center mb-5">
+                <div class="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="w-8 h-8 text-green-600" viewBox="0 0 24 24"
+                        fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
+                        stroke-linejoin="round">
+                        <polyline points="20 6 9 17 4 12"/>
+                    </svg>
+                </div>
+            </div>
+            <h2 class="text-xl font-bold text-slate-800 mb-2">Email Verified!</h2>
+            <p class="text-slate-500 text-sm mb-6">Your account is now active. You can sign in.</p>
+            <a href="/login"
+                class="block w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-lg transition duration-200">
+                Go to Login
+            </a>
+        </div>
+
+        <!-- Error -->
+        <div id="stateError" class="hidden">
+            <div class="flex justify-center mb-5">
+                <div class="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="w-8 h-8 text-red-600" viewBox="0 0 24 24"
+                        fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                        stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"/>
+                        <line x1="12" y1="8" x2="12" y2="12"/>
+                        <line x1="12" y1="16" x2="12.01" y2="16"/>
+                    </svg>
+                </div>
+            </div>
+            <h2 class="text-xl font-bold text-slate-800 mb-2">Verification Failed</h2>
+            <p id="errorMessage" class="text-slate-500 text-sm mb-6">
+                This link is invalid or has expired.
+            </p>
+            <a href="/login"
+                class="block w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-lg transition duration-200 mb-3">
+                Back to Login
+            </a>
+            <p class="text-slate-400 text-xs">
+                Need a new link? Use the <strong>Resend</strong> button on the login page after trying to sign in.
+            </p>
+        </div>
+
+    </div>
+
+    <script>
+        function show(stateId, message) {
+            ['stateLoading', 'stateSuccess', 'stateError'].forEach(id =>
+                document.getElementById(id).classList.add('hidden')
+            );
+            document.getElementById(stateId).classList.remove('hidden');
+            if (message) document.getElementById('errorMessage').textContent = message;
+        }
+
+        (async function verifyEmail() {
+            const token = new URLSearchParams(window.location.search).get('token');
+
+            if (!token) {
+                show('stateError', 'No verification token found. Please use the link from your email.');
+                return;
+            }
+
+            try {
+                const res  = await fetch('/verify-email', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token }),
+                });
+                const data = await res.json();
+
+                if (res.ok) {
+                    show('stateSuccess');
+                } else {
+                    show('stateError', data.detail || 'Verification failed. Please try again.');
+                }
+            } catch {
+                show('stateError', 'Could not connect to the server. Please check your connection and try again.');
+            }
+        })();
+    </script>
+</body>
+</html>
