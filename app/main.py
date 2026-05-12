@@ -62,33 +62,51 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 # The JavaScript inside those files will call our JSON APIs later.
 _NO_CACHE = {"Cache-Control": "no-store"}
 
-@app.get("/")
+@app.get("/", include_in_schema=False)
 async def read_root():
+    """Serve the candidate-facing job board (index.html)."""
     return FileResponse("app/static/index.html", headers=_NO_CACHE)
 
 
-@app.get("/dashboard")
+@app.get("/dashboard", include_in_schema=False)
 async def read_dashboard():
+    """Serve the recruiter dashboard (dashboard.html). Requires a valid JWT stored in localStorage."""
     return FileResponse("app/static/dashboard.html", headers=_NO_CACHE)
 
 
-@app.get("/login")
+@app.get("/login", include_in_schema=False)
 async def read_login():
+    """Serve the recruiter login page (login.html)."""
     return FileResponse("app/static/login.html", headers=_NO_CACHE)
 
 
-@app.get("/register")
+@app.get("/register", include_in_schema=False)
 async def read_register():
+    """Serve the recruiter registration page (register.html)."""
     return FileResponse("app/static/register.html", headers=_NO_CACHE)
 
 
-@app.get("/verify-email")
+@app.get("/verify-email", include_in_schema=False)
 async def read_verify_email():
+    """
+    Serve the email-verification landing page (verify-email.html).
+
+    The page reads the `?token=` query parameter from the URL, then calls
+    `POST /verify-email` via JavaScript to complete verification — no raw
+    JSON is ever shown to the user.
+    """
     return FileResponse("app/static/verify-email.html", headers=_NO_CACHE)
 
 
-@app.get("/reset-password")
+@app.get("/reset-password", include_in_schema=False)
 async def read_reset_password():
+    """
+    Serve the password-reset page (reset-password.html).
+
+    The page reads the `?token=` query parameter from the URL and presents
+    a new-password form. On submission it calls `POST /reset-password` via
+    JavaScript.
+    """
     return FileResponse("app/static/reset-password.html", headers=_NO_CACHE)
 
 
@@ -105,8 +123,15 @@ SessionDep = Annotated[Session, Depends(get_session)]
 AIDep = Annotated[AIProvider, Depends(get_ai_provider)]
 
 
-@app.get("/health")
+@app.get("/health", tags=["Infra"])
 async def health_check():
+    """
+    Liveness probe for load balancers and container orchestrators.
+
+    Returns a simple JSON payload confirming the API process is running.
+    Does **not** check downstream dependencies (DB, Redis, MinIO) — use this
+    only to verify the web container itself is alive.
+    """
     return {"status": "ok", "message": "SmartATS is ready to serve 🚀"}
 
 
@@ -116,14 +141,21 @@ async def health_check():
 # Create a Job (POST)
 # SECURITY: Notice 'current_user' dependency.
 # If the user does not have a valid Token, FastAPI rejects this request (401).
-@app.post("/jobs", response_model=JobListing)
+@app.post("/jobs", response_model=JobListing, tags=["Jobs"])
 def create_job(
     job: JobListing,
     session: SessionDep,
     current_user: Annotated[User, Depends(get_current_user)],
 ):
     """
-    Create a new Job Listing (Protected: Recruiters Only).
+    Create a new job listing. Protected — requires a valid recruiter JWT.
+
+    Automatically sets `owner_id` to the authenticated recruiter so they can
+    only manage their own postings.
+
+    **Errors:**
+    - `401` – missing or invalid token
+    - `422` – validation failure (e.g. title too short, negative salary)
     """
     job.owner_id = current_user.id
     session.add(job)
@@ -133,20 +165,34 @@ def create_job(
 
 
 # List all Jobs (GET) — PUBLIC for candidates
-@app.get("/jobs", response_model=List[JobListing])
+@app.get("/jobs", response_model=List[JobListing], tags=["Jobs"])
 def list_jobs(session: SessionDep):
     """
-    Retrieve all open job positions (public, used by candidates).
+    List all job postings. Public — no authentication required.
+
+    Used by the candidate-facing job board (`/`) to populate the list of
+    open positions that candidates can apply to.
     """
     return session.exec(select(JobListing)).all()
 
 
-@app.delete("/jobs/{job_id}", status_code=204)
+@app.delete("/jobs/{job_id}", status_code=204, tags=["Jobs"])
 def delete_job(
     job_id: int,
     session: SessionDep,
     current_user: Annotated[User, Depends(get_current_user)],
 ):
+    """
+    Permanently delete a job listing and all its applications. Protected.
+
+    The database CASCADE constraint removes every `Application` row linked
+    to this job automatically, so no orphaned records are left behind.
+
+    **Errors:**
+    - `401` – missing or invalid token
+    - `403` – the job belongs to a different recruiter
+    - `404` – no job found with the given ID
+    """
     job = session.get(JobListing, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
@@ -156,13 +202,28 @@ def delete_job(
     session.commit()
 
 
-@app.patch("/jobs/{job_id}", response_model=JobListing)
+@app.patch("/jobs/{job_id}", response_model=JobListing, tags=["Jobs"])
 def update_job(
     job_id: int,
     updates: JobListingUpdate,
     session: SessionDep,
     current_user: Annotated[User, Depends(get_current_user)],
 ):
+    """
+    Partially update a job listing. Protected. Only provided fields are changed.
+
+    If any of `title`, `description`, `skills`, or `location` change, all
+    existing applications for this job are automatically reset to `pending`
+    and re-queued for AI re-scoring, because the new details may affect how
+    well a resume matches. Changing only `salary_range` does **not** trigger
+    re-scoring as salary is not considered by the AI.
+
+    **Errors:**
+    - `401` – missing or invalid token
+    - `403` – the job belongs to a different recruiter
+    - `404` – no job found with the given ID
+    - `422` – validation failure on updated fields
+    """
     job = session.get(JobListing, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
@@ -195,13 +256,20 @@ def update_job(
 
 
 # List only the logged-in recruiter's jobs — PROTECTED
-@app.get("/my-jobs", response_model=List[JobListing])
+@app.get("/my-jobs", response_model=List[JobListing], tags=["Jobs"])
 def list_my_jobs(
     session: SessionDep,
     current_user: Annotated[User, Depends(get_current_user)],
 ):
     """
-    Retrieve job listings owned by the current recruiter.
+    List only the job postings that belong to the authenticated recruiter.
+
+    Used by the recruiter dashboard to show the left-hand jobs panel.
+    Unlike `GET /jobs`, this endpoint filters by `owner_id` so recruiters
+    only see their own postings.
+
+    **Errors:**
+    - `401` – missing or invalid token
     """
     return session.exec(
         select(JobListing).where(JobListing.owner_id == current_user.id)
@@ -209,11 +277,18 @@ def list_my_jobs(
 
 
 # --- AI ANALYSIS ROUTES (Direct Test) ---
-@app.post("/analyze")
+@app.post("/analyze", tags=["AI"])
 async def analyze_resume_text(request: AnalysisRequest, ai: AIDep):
     """
-    Direct endpoint to test AI output without saving to DB.
-    Useful for debugging the LLM prompt.
+    Debug endpoint — run the AI scorer against raw text without touching the DB.
+
+    Scores the supplied text against a generic Senior Developer role and
+    returns the raw AI response string. Useful for verifying the active AI
+    provider (Gemini or Ollama) and tuning the prompt without creating an
+    application record.
+
+    This endpoint is **not** used by the normal application flow; use
+    `POST /process` for real submissions.
     """
     prompt = f"""
     You are an expert tech recruiter. Analyze the following resume text against a generic Senior Developer role.
@@ -232,15 +307,26 @@ async def analyze_resume_text(request: AnalysisRequest, ai: AIDep):
 
 
 # --- FILE UPLOAD ROUTES ---
-@app.post("/upload")
+@app.post("/upload", tags=["Applications"])
 async def upload_resume(
-    # REMOVED: current_user dependency.
-    # Candidates are anonymous users. We must allow them to upload without login.
     file: UploadFile = File(...),
 ):
     """
-    Accepts a PDF file, validates it, extracts text, and saves to MinIO.
-    PUBLIC ENDPOINT (No Auth Required)
+    Upload a candidate's resume PDF. Public — no authentication required.
+
+    Performs two validation layers before storing the file:
+    1. **MIME type check** — rejects anything that is not `application/pdf`.
+    2. **Magic-byte check** — reads the first 4 bytes and rejects files that
+       do not start with `%PDF`, catching renamed non-PDF files.
+
+    On success, extracts the full resume text (used later by the AI scorer),
+    stores the PDF in MinIO under a UUID key to prevent filename collisions,
+    and returns the internal download URL (`/download/{s3_key}`) for the
+    frontend to include in the application submission payload.
+
+    **Errors:**
+    - `400` – wrong MIME type or corrupt/non-PDF file
+    - `500` – text extraction failed or MinIO storage error
     """
 
     # 1. Validation: Check File Extension
@@ -298,11 +384,21 @@ async def upload_resume(
     }
 
 
-@app.get("/download/{s3_key}")
+@app.get("/download/{s3_key}", tags=["Applications"])
 async def download_resume(s3_key: str):
     """
-    Proxy endpoint: fetches the PDF from MinIO (internal) and streams it to the browser.
-    MinIO is not publicly accessible, so the browser must go through FastAPI.
+    Stream a stored resume PDF to the browser. Public — no authentication required.
+
+    Acts as a reverse proxy between the browser and MinIO. MinIO runs on the
+    internal Docker network and is not reachable directly by browsers, so all
+    PDF downloads are routed through this endpoint.
+
+    The PDF is streamed (not buffered) to avoid loading large files fully into
+    memory, and served with `Content-Disposition: inline` so the browser
+    renders it in-tab rather than forcing a download.
+
+    **Errors:**
+    - `404` – no object found in MinIO for the given key
     """
     try:
         s3 = get_s3_client()
@@ -317,15 +413,22 @@ async def download_resume(s3_key: str):
 
 
 # --- APPLICATION ROUTES ---
-@app.get("/applications/{job_id}", response_model=List[Application])
+@app.get("/applications/{job_id}", response_model=List[Application], tags=["Applications"])
 def get_applications(
     job_id: int,
     session: SessionDep,
     current_user: Annotated[User, Depends(get_current_user)],
 ):
     """
-    Recruiter Dashboard: View all applicants for a specific job.
-    Returns the list sorted by 'ai_score' so the best candidates appear first.
+    Retrieve all applications for a specific job, ranked by AI score. Protected.
+
+    Returns the full application list sorted by `ai_score` descending so the
+    best-matching candidates appear at the top of the recruiter dashboard.
+    Applications still being processed by the worker have `status = "pending"`
+    and `ai_score = 0`; the dashboard polls and refreshes to pick up updates.
+
+    **Errors:**
+    - `401` – missing or invalid token
     """
     statement = (
         select(Application)
@@ -337,13 +440,26 @@ def get_applications(
 
 
 # --- Processing ROUTES (The Main Workflow) ---
-@app.post("/process")
+@app.post("/process", tags=["Applications"])
 async def process_resume(payload: ApplicationSubmit, session: SessionDep):
     """
-    The Orchestrator Endpoint.
-    1. Receives the full application package (Job ID + Candidate + Resume Text).
-    2. SAVES the application to Postgres immediately (Status: Pending).
-    3. DISPATCHES the AI task to the Celery Worker.
+    Submit a candidate application and queue it for AI scoring. Public.
+
+    Orchestrates the full application intake in two steps:
+
+    1. **Persist immediately** — saves the application to Postgres with
+       `status = "pending"` before any AI work begins. This guarantees the
+       application is never lost even if the worker crashes mid-processing.
+    2. **Dispatch asynchronously** — sends the resume text and application ID
+       to the Celery worker via Redis. The worker calls Gemini, writes the
+       score and critique back to the DB, and emails the candidate.
+
+    The returned `task_id` can be polled via `GET /process/{task_id}` to
+    track progress.
+
+    **Errors:**
+    - `409` – the candidate has already applied to this job (unique constraint
+      on `job_id` + `candidate_email`)
     """
 
     # A. Create Record in Postgres
@@ -381,11 +497,18 @@ async def process_resume(payload: ApplicationSubmit, session: SessionDep):
     }
 
 
-@app.get("/process/{task_id}")
+@app.get("/process/{task_id}", tags=["Applications"])
 async def get_processing_status(task_id: str):
     """
-    Polls the status of a background task.
-    Used by the frontend to show progress bars.
+    Poll the status of a Celery AI-scoring task. Public.
+
+    The frontend calls this endpoint repeatedly after submitting an application
+    to drive the progress indicator. Queries the Celery result backend (Redis)
+    for the task state and returns one of:
+
+    - `Processing...` — task is queued or running
+    - `Done` — scoring completed; result contains `score`
+    - `Failed` — worker encountered an unrecoverable error; error detail included
     """
     # 1. Fetch the result from Redis Backend
     task_result = AsyncResult(task_id, app=celery_app)
