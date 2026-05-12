@@ -24,11 +24,11 @@ from app.config import settings
 from app.database import create_db_and_tables, get_session
 
 # CRITICAL: We import ApplicationSubmit here to handle the full frontend payload
-from app.models import AnalysisRequest, Application, ApplicationSubmit, JobListing, User
+from app.models import AnalysisRequest, Application, ApplicationSubmit, JobListing, JobListingUpdate, User
 from app.utils import get_s3_client, init_storage
 from sqlalchemy.exc import IntegrityError
 
-from app.worker import analyze_resume_task, celery_app
+from app.worker import analyze_resume_task, celery_app, rescore_application_task
 
 
 # 1. LIFESPAN CONTEXT MANAGER
@@ -129,6 +129,59 @@ def list_jobs(session: SessionDep):
     Retrieve all open job positions (public, used by candidates).
     """
     return session.exec(select(JobListing)).all()
+
+
+@app.delete("/jobs/{job_id}", status_code=204)
+def delete_job(
+    job_id: int,
+    session: SessionDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    job = session.get(JobListing, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this job.")
+    session.delete(job)   # CASCADE removes all applications automatically
+    session.commit()
+
+
+@app.patch("/jobs/{job_id}", response_model=JobListing)
+def update_job(
+    job_id: int,
+    updates: JobListingUpdate,
+    session: SessionDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    job = session.get(JobListing, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to edit this job.")
+
+    patch = updates.model_dump(exclude_unset=True)
+    changed_fields = set(patch.keys())
+    for key, value in patch.items():
+        setattr(job, key, value)
+    session.add(job)
+    session.commit()
+    session.refresh(job)
+
+    # Re-score only when fields that affect candidate fit actually change.
+    # Salary is a business constraint invisible to the AI — no re-score needed.
+    RESCORE_FIELDS = {"title", "description", "skills", "location"}
+    if changed_fields & RESCORE_FIELDS:
+        applications = session.exec(select(Application).where(Application.job_id == job_id)).all()
+        for app_record in applications:
+            app_record.status = "pending"
+            app_record.ai_score = 0
+            app_record.ai_critique = None
+            session.add(app_record)
+        session.commit()
+        for app_record in applications:
+            rescore_application_task.delay(app_record.id)
+
+    return job
 
 
 # List only the logged-in recruiter's jobs — PROTECTED

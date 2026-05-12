@@ -20,7 +20,7 @@
         <div class="w-1/3">
             <div class="flex justify-between items-center mb-6">
                 <h2 class="text-xl font-bold text-slate-800">Your Jobs</h2>
-                <button onclick="document.getElementById('jobModal').classList.remove('hidden')" class="bg-indigo-600 text-white p-2 rounded-lg hover:bg-indigo-700"><i data-lucide="plus" class="w-5 h-5"></i></button>
+                <button onclick="openCreateModal()" class="bg-indigo-600 text-white p-2 rounded-lg hover:bg-indigo-700"><i data-lucide="plus" class="w-5 h-5"></i></button>
             </div>
             <div id="jobsList" class="space-y-4">
                 <div class="text-slate-400 text-center py-4">Loading...</div>
@@ -62,16 +62,16 @@
 
     <div id="jobModal" class="hidden fixed inset-0 bg-slate-900/50 flex items-center justify-center z-50">
         <div class="bg-white p-6 rounded-lg w-96 shadow-2xl">
-            <h3 class="font-bold text-lg mb-4">Post New Job</h3>
+            <h3 id="jobModalTitle" class="font-bold text-lg mb-4">Post New Job</h3>
             <form id="jobForm" class="space-y-3">
                 <input name="title" placeholder="Job Title (min 5 chars)" class="w-full border p-2 rounded" required minlength="5">
                 <input name="description" placeholder="Description (min 10 chars)" class="w-full border p-2 rounded" required minlength="10">
                 <input name="skills" placeholder="Skills (comma sep)" class="w-full border p-2 rounded" required>
                 <input name="location" placeholder="Location" class="w-full border p-2 rounded" required>
-                <input name="salary_range" placeholder="Salary ($100k-$120k)" class="w-full border p-2 rounded" required>
-                <button type="submit" class="w-full bg-indigo-600 text-white py-2 rounded font-bold">Post</button>
+                <input name="salary_range" placeholder="Salary ($100k-$120k)" class="w-full border p-2 rounded">
+                <button type="submit" id="jobModalSubmitBtn" class="w-full bg-indigo-600 text-white py-2 rounded font-bold">Post</button>
             </form>
-            <button onclick="document.getElementById('jobModal').classList.add('hidden')" class="w-full mt-2 text-slate-400 text-sm">Cancel</button>
+            <button onclick="document.getElementById('jobModal').classList.add('hidden'); editingJobId = null;" class="w-full mt-2 text-slate-400 text-sm">Cancel</button>
         </div>
     </div>
 
@@ -101,35 +101,92 @@
     <script src="/static/js/api.js"></script>
     <script>
         lucide.createIcons();
-        
-        let activeJobId = null;
+
+        let activeJobId    = null;
         let activeJobTitle = "";
-        
-        // CRITICAL: We store fetched applications here by ID
-        // This prevents HTML syntax errors when passing data to onclick
-        let applicationMap = {}; 
+        let editingJobId   = null;
+        let applicationMap = {};
+        let jobMap         = {};
 
         // 1. Load Jobs
         async function loadJobs() {
             try {
                 const jobs = await Api.getMyJobs();
+                jobMap = {};
+                jobs.forEach(j => jobMap[j.id] = j);
+
                 const list = document.getElementById('jobsList');
+                if (jobs.length === 0) {
+                    list.innerHTML = '<div class="text-slate-400 text-center py-8 text-sm">No jobs yet. Click + to post one.</div>';
+                    return;
+                }
                 list.innerHTML = jobs.map(job => `
-                    <div onclick="loadApplicants(${job.id}, '${job.title.replace(/'/g, "\\'")}')" 
-                         class="bg-white p-4 rounded-lg border border-slate-200 hover:border-indigo-500 cursor-pointer shadow-sm transition group">
-                        <h3 class="font-bold text-slate-800 group-hover:text-indigo-600">${job.title}</h3>
-                        <div class="text-xs text-slate-500 mt-1 flex justify-between">
-                            <span>${job.location}</span>
-                            <span>${job.salary_range}</span>
+                    <div class="bg-white p-4 rounded-lg border border-slate-200 hover:border-indigo-500 shadow-sm transition group">
+                        <div onclick="loadApplicants(${job.id}, '${job.title.replace(/'/g, "\\'")}')" class="cursor-pointer">
+                            <h3 class="font-bold text-slate-800 group-hover:text-indigo-600">${job.title}</h3>
+                            <div class="text-xs text-slate-500 mt-1 flex justify-between">
+                                <span>${job.location}</span>
+                                <span>${job.salary_range || ''}</span>
+                            </div>
+                        </div>
+                        <div class="flex gap-2 mt-3 justify-end">
+                            <button onclick="event.stopPropagation(); openEditModal(${job.id})"
+                                class="text-xs text-slate-500 hover:text-indigo-600 border border-slate-200 rounded px-2 py-1 transition">Edit</button>
+                            <button onclick="event.stopPropagation(); confirmDeleteJob(${job.id})"
+                                class="text-xs text-slate-500 hover:text-red-600 border border-slate-200 rounded px-2 py-1 transition">Delete</button>
                         </div>
                     </div>
                 `).join('');
                 lucide.createIcons();
             } catch (e) {
                 console.error(e);
-                // If 401, Api class handles redirect
             }
         }
+
+        window.openCreateModal = () => {
+            editingJobId = null;
+            document.getElementById('jobModalTitle').textContent = 'Post New Job';
+            document.getElementById('jobModalSubmitBtn').textContent = 'Post';
+            document.getElementById('jobForm').reset();
+            document.getElementById('jobModal').classList.remove('hidden');
+        };
+
+        window.openEditModal = (jobId) => {
+            const job = jobMap[jobId];
+            if (!job) return;
+            editingJobId = jobId;
+            document.getElementById('jobModalTitle').textContent = 'Edit Job Posting';
+            document.getElementById('jobModalSubmitBtn').textContent = 'Save Changes';
+            const form = document.getElementById('jobForm');
+            form.querySelector('[name="title"]').value       = job.title;
+            form.querySelector('[name="description"]').value = job.description;
+            form.querySelector('[name="skills"]').value      = job.skills;
+            form.querySelector('[name="location"]').value    = job.location;
+            form.querySelector('[name="salary_range"]').value = job.salary_range || '';
+            document.getElementById('jobModal').classList.remove('hidden');
+        };
+
+        window.confirmDeleteJob = (jobId) => {
+            const job = jobMap[jobId];
+            if (!job) return;
+            showConfirmModal({
+                title: "Delete Job Posting",
+                details: [{ label: "Title", value: job.title }],
+                confirmText: "Delete",
+                note: "This will permanently delete the job and all its applications.",
+                onConfirm: async () => {
+                    try {
+                        await Api.deleteJob(jobId);
+                        if (activeJobId === jobId) {
+                            activeJobId = null;
+                            document.getElementById('applicantView').classList.add('hidden');
+                            document.getElementById('emptyState').classList.remove('hidden');
+                        }
+                        loadJobs();
+                    } catch (e) { /* modal shown by api.js */ }
+                }
+            });
+        };
 
         // 2. Load Applicants
         window.loadApplicants = async (jobId, jobTitle) => {
@@ -213,18 +270,28 @@
         // Init
         loadJobs();
         
-        // Post Job Handler
+        // Create / Edit Job Handler
         document.getElementById('jobForm').addEventListener('submit', async (e) => {
             e.preventDefault();
-            const fd = new FormData(e.target);
+            const data = Object.fromEntries(new FormData(e.target));
             try {
-                await Api.postJob(Object.fromEntries(fd));
-                document.getElementById('jobModal').classList.add('hidden');
-                loadJobs();
+                if (editingJobId) {
+                    await Api.updateJob(editingJobId, data);
+                    document.getElementById('jobModal').classList.add('hidden');
+                    editingJobId = null;
+                    loadJobs();
+                    if (activeJobId) refreshApplicants();
+                    showModal(
+                        "Job updated. All existing applications are being re-scored and will update shortly.",
+                        'success'
+                    );
+                } else {
+                    await Api.postJob(data);
+                    document.getElementById('jobModal').classList.add('hidden');
+                    loadJobs();
+                }
                 e.target.reset();
-            } catch(err) {
-                // api.js already shows the error modal
-            }
+            } catch(err) { /* modal shown by api.js */ }
         });
     </script>
 </body>

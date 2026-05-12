@@ -4,8 +4,14 @@
 
 from typing import Protocol, Any
 from google import genai
+from google.api_core.exceptions import ServiceUnavailable, ResourceExhausted
 import httpx
 from app.config import settings
+
+
+class GeminiUnavailableError(Exception):
+    """Raised when Gemini returns a transient 503/429 error worth retrying."""
+
 
 # 1. The Interface (Protocol)
 # This defines the rules. Any class that claims to be an "AIProvider" must implement the 'analyze_text' method.
@@ -28,14 +34,16 @@ class GeminiProvider:
         Uses the client.aio (AsyncIO) interfact to avoid blocking
         """
         try:
-            # The new SDK exposes asuync methods under the 'aio' property
+            # The new SDK exposes async methods under the 'aio' property
             response = await self.client.aio.models.generate_content(
                 model=self.model_name,
                 contents=prompt
             )
             return response.text
+        except (ServiceUnavailable, ResourceExhausted) as e:
+            raise GeminiUnavailableError(str(e)) from e
         except Exception as e:
-            return f"Gemini Error: {str(e)}"
+            raise
 
 # 3.  The local Implementation (Ollama / Llama3)
 class LlamaProvider:

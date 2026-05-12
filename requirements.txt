@@ -7,6 +7,7 @@ python-multipart
 argon2-cffi
 python-jose[cryptography]
 google-genai
+google-api-core
 httpx
 minio
 pypdf

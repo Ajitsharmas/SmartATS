@@ -3,3 +3,4 @@
 .env
 .env.local
 __pycache__/
+test_cv.pdf

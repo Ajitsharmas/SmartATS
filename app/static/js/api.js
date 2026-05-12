@@ -164,7 +164,7 @@ class Api {
                 throw new Error(detail);
             }
 
-            return await response.json();
+            return response.status === 204 ? null : await response.json();
         } catch (error) {
             console.error("API Call Failed:", error);
             showModal(error.message);
@@ -205,7 +205,9 @@ class Api {
     // usage: await Api.getJobs() vs fetch('http://localhost:8000/jobs'...)
 
     static async getJobs()   { return await this.request("/jobs"); }
-    static async getMyJobs() { return await this.request("/my-jobs"); }
+    static async getMyJobs()             { return await this.request("/my-jobs"); }
+    static async deleteJob(jobId)        { return await this.request(`/jobs/${jobId}`, "DELETE"); }
+    static async updateJob(jobId, data)  { return await this.request(`/jobs/${jobId}`, "PATCH", data); }
 
     static async postJob(jobData) { return await this.request("/jobs", "POST", jobData); }
 

@@ -10,6 +10,7 @@ from pydantic import (
     EmailStr,
     field_validator,
 )  # Added EmailStr for robust validation
+from sqlalchemy import Column, Integer, ForeignKey
 from sqlmodel import Field, SQLModel, UniqueConstraint
 
 
@@ -141,8 +142,10 @@ class Application(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
 
-    # Link to the specific job they applied for
-    job_id: int = Field(foreign_key="joblisting.id")
+    # CASCADE ensures all applications are deleted when the parent job is deleted
+    job_id: int = Field(
+        sa_column=Column(Integer, ForeignKey("joblisting.id", ondelete="CASCADE"), nullable=False)
+    )
 
     # Candidate Info (Snapshot at time of application)
     candidate_email: str
@@ -155,3 +158,21 @@ class Application(SQLModel, table=True):
     status: str = "pending"  # pending -> processed
 
     created_at: datetime = Field(default_factory=datetime.now)
+
+
+class JobListingUpdate(SQLModel):
+    """Partial-update schema for PATCH /jobs/{id}."""
+    title: str | None = Field(default=None, min_length=5, max_length=100)
+    description: str | None = Field(default=None, min_length=10)
+    skills: str | None = None
+    location: str | None = None
+    salary_range: str | None = None
+
+    @field_validator("salary_range", mode="after")
+    @classmethod
+    def validate_salary(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value.strip().startswith("-"):
+            raise ValueError("Salary cannot be negative.")
+        return value
