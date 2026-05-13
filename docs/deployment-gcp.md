@@ -284,18 +284,102 @@ Open `http://YOUR_GCP_STATIC_IP:9001` in your browser. Login with the `MINIO_ACC
 
 ### Option B — Restrict the entire app to your IP only
 
-Use this if you want the app completely private during development — no one except you can reach it at all.
+Use this if you want the app completely private — no one except you can reach it at all.
 
-Find the existing HTTP/HTTPS firewall rules:
+> **Important:** Let's Encrypt certificate issuance requires port 80 to be open to `0.0.0.0/0`. Complete the SSL setup (`setup-ssl.sh`) first before restricting access. Once the certificate is issued, lock it down using the steps below.
 
-GCP Console → **VPC Network → Firewall** → look for `default-allow-http` and any HTTPS rule.
+#### Step 1 — Find your current public IP
 
-Edit each one and change:
-- **Source IP ranges:** `0.0.0.0/0` → `YOUR_IP/32`
+```bash
+curl ifconfig.me
+```
 
-Do this for both port 80 and port 443.
+Note this IP — you will use it in every firewall rule below.
 
-To open access back up to everyone (e.g. when showing an interviewer), change the source IP ranges back to `0.0.0.0/0`.
+#### Step 2 — Delete or disable the existing open HTTP/HTTPS rules
+
+GCP Console → **VPC Network → Firewall**
+
+Look for these rules and **delete** them (or disable them):
+- `default-allow-http` — allows port 80 from `0.0.0.0/0`
+- `default-allow-https` (or `allow-https`) — allows port 443 from `0.0.0.0/0`
+
+#### Step 3 — Create new restricted rules for HTTP and HTTPS
+
+**Rule 1 — HTTP (your IP only)**
+
+GCP Console → **VPC Network → Firewall → Create Firewall Rule**
+
+| Field | Value |
+|---|---|
+| Name | `allow-http-myip` |
+| Description | Allow HTTP access from my IP only |
+| Logs | Off |
+| Network | `default` |
+| Priority | `1000` |
+| Direction of traffic | Ingress |
+| Action on match | Allow |
+| Targets | All instances in the network |
+| Source filter | IPv4 ranges |
+| Source IPv4 ranges | `YOUR_IP/32` |
+| Protocols and ports | TCP → `80` |
+
+**Rule 2 — HTTPS (your IP only)**
+
+| Field | Value |
+|---|---|
+| Name | `allow-https-myip` |
+| Description | Allow HTTPS access from my IP only |
+| Logs | Off |
+| Network | `default` |
+| Priority | `1000` |
+| Direction of traffic | Ingress |
+| Action on match | Allow |
+| Targets | All instances in the network |
+| Source filter | IPv4 ranges |
+| Source IPv4 ranges | `YOUR_IP/32` |
+| Protocols and ports | TCP → `443` |
+
+**Rule 3 — Postgres (your IP only)**
+
+| Field | Value |
+|---|---|
+| Name | `allow-postgres-myip` |
+| Source IPv4 ranges | `YOUR_IP/32` |
+| Protocols and ports | TCP → `5432` |
+
+**Rule 4 — MinIO (your IP only)**
+
+| Field | Value |
+|---|---|
+| Name | `allow-minio-myip` |
+| Source IPv4 ranges | `YOUR_IP/32` |
+| Protocols and ports | TCP → `9000,9001` |
+
+#### Step 4 — Verify it's working
+
+Open `https://smartats.xyz` in your browser — it should load. Ask someone else to try — they should get a connection timeout (not a 403, just no response at all).
+
+#### When your IP changes
+
+Home and office IPs are dynamic and can change. If `https://smartats.xyz` suddenly stops loading for you:
+
+```bash
+curl ifconfig.me
+```
+
+Then update **all four rules** (`allow-http-myip`, `allow-https-myip`, `allow-postgres-myip`, `allow-minio-myip`) in GCP Console with the new IP.
+
+GCP Console → **VPC Network → Firewall** → click the rule → **Edit** → update Source IPv4 ranges → **Save**.
+
+#### Temporarily opening access to everyone
+
+If you want to share the app publicly for a period:
+
+1. Edit `allow-http-myip` → change Source IPv4 ranges to `0.0.0.0/0` → Save
+2. Edit `allow-https-myip` → change Source IPv4 ranges to `0.0.0.0/0` → Save
+
+To lock it down again, change both back to `YOUR_IP/32`.
 
 ---
 

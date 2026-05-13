@@ -28,9 +28,53 @@ Two nginx config files are provided:
 
 ---
 
+## Prerequisites before running setup-ssl.sh
+
+### GCP firewall — port 80 must be open to the public internet
+
+Let's Encrypt verifies domain ownership by sending an HTTP request **from their own servers** to your VM on port 80. This is not a browser request — it comes from Let's Encrypt's infrastructure. If port 80 is blocked by the GCP firewall, the challenge times out and the certificate cannot be issued.
+
+Port 80 **must** allow inbound traffic from `0.0.0.0/0` (everyone). This is safe because:
+- Nginx only serves the `/.well-known/acme-challenge/` path over HTTP
+- All other HTTP traffic is immediately redirected to HTTPS
+
+**Create the HTTP firewall rule:**
+
+GCP Console → **VPC Network → Firewall → Create Firewall Rule**
+
+Fill in every field exactly as follows:
+
+| Field | Value |
+|---|---|
+| Name | `allow-http` |
+| Description | Allow HTTP traffic for Let's Encrypt ACME challenge and HTTP→HTTPS redirect |
+| Logs | Off |
+| Network | `default` |
+| Priority | `1000` |
+| Direction of traffic | Ingress |
+| Action on match | Allow |
+| Targets | All instances in the network |
+| Source filter | IPv4 ranges |
+| Source IPv4 ranges | `0.0.0.0/0` |
+| Protocols and ports | Specified protocols and ports → TCP → `80` |
+
+Click **Create**.
+
+> **Note:** If you ticked "Allow HTTP traffic" when creating the VM, this rule (`default-allow-http`) already exists and no action is needed. Check GCP Console → VPC Network → Firewall to confirm.
+
+Similarly, ensure port 443 is also open for HTTPS traffic after the certificate is issued:
+
+| Field | Value |
+|---|---|
+| Name | `allow-https` |
+| Source IPv4 ranges | `0.0.0.0/0` |
+| Protocols and ports | TCP → `443` |
+
+---
+
 ## Initial certificate issuance
 
-Run this **once** on the GCP VM after DNS has fully propagated:
+Run this **once** on the GCP VM after DNS has fully propagated and the port 80 firewall rule is in place:
 
 Run these commands from the **root of your project folder on the GCP VM** (the same folder that contains `docker-compose.prod.yaml`):
 
