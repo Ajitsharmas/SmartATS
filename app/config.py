@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     DEBUG: bool = True
 
     # Database Config
-    DATABASE_URL: str = "postgresql://resume_user:resume_pass@localhost:5432/resume_db"
+    DATABASE_URL: str = "postgresql://username:password@localhost:5432/db_name"
 
     # AI Config
     # Modes: "gemini" or "local"
@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     # Storage Config (MinIO)
     # In the production, these would come from .env files
     MINIO_ENDPOINT: str = "http://localhost:9000"
-    MINIO_ACCESS_KEY: str = "minioadmin"
-    MINIO_SECRET_KEY: str = "minioadmin"
+    MINIO_ACCESS_KEY: str = "dummy"
+    MINIO_SECRET_KEY: str = "dummy"
     MINIO_BUCKET_NAME: str = "resumes"
 
     # Celery & Redis Config
