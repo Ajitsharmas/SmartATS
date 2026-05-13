@@ -2,8 +2,6 @@
 # Purpose: Production Orchestration
 # ---------------------------------------------------------------------------------------------------------------------------------------------
 
-version: '3.8'
-
 services:
   # 1. Nginx — reverse proxy, rate limiting, SSL termination
   nginx:

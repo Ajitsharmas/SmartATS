@@ -32,7 +32,12 @@ Two nginx config files are provided:
 
 Run this **once** on the GCP VM after DNS has fully propagated:
 
+Run these commands from the **root of your project folder on the GCP VM** (the same folder that contains `docker-compose.prod.yaml`):
+
 ```bash
+# Make sure you are in the project root on the VM
+cd ~/SmartATS
+
 chmod +x setup-ssl.sh
 ./setup-ssl.sh your@email.com
 ```

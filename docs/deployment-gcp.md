@@ -170,14 +170,29 @@ For a private repo, use a personal access token in the URL or set up an SSH depl
 
 ### Step 9 — Copy `.env` to the VM
 
-**Never commit `.env` to git.** Copy it from your local machine:
+**Never commit `.env` to git.**
+
+> **Critical:** The `gcloud compute scp` command must be run from your **local Mac terminal** — NOT from inside the SSH session on the VM. If you run it from inside the VM, gcloud will fail with "insufficient authentication scopes" because the VM's service account does not have permission to copy files to itself.
+
+**Option A — Copy from your local Mac (recommended)**
+
+Open a new terminal on your Mac (close or set aside the SSH session), navigate to your project folder, and run:
 
 ```bash
-# Run this on your local Mac
+# Run this on your LOCAL Mac — not inside the SSH session
 gcloud compute scp .env YOUR_INSTANCE_NAME:~/YOUR_REPO/.env --zone=us-central1-a
 ```
 
-Or create it manually on the server with `nano .env` and paste the contents.
+**Option B — Create it directly on the VM**
+
+If you are already inside the SSH session and don't want to open a new terminal, create the file manually:
+
+```bash
+# Run this inside the SSH session on the VM
+nano ~/YOUR_REPO/.env
+```
+
+Paste your `.env` contents, then save with `Ctrl+X → Y → Enter`.
 
 ### Step 10 — Run the DB migration (existing deployments only)
 

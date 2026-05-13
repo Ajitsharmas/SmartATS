@@ -38,7 +38,7 @@ sleep 10
 
 # --- Step 2: Obtain the certificate via webroot challenge ---
 echo "[2/4] Requesting Let's Encrypt certificate..."
-docker compose -f "$COMPOSE_FILE" run --rm certbot certonly \
+docker compose -f "$COMPOSE_FILE" run --rm --entrypoint certbot certbot certonly \
     --webroot \
     --webroot-path=/var/www/certbot \
     --email "$EMAIL" \
