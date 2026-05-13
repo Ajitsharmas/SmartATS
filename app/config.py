@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     # The URL for the Backend (where the results are stored)
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
+    # Redis URL for SlowAPI rate-limit counters (separate concern from Celery)
+    RATE_LIMITER_STORAGE_URL: str = "redis://localhost:6379/0"
 
     # Security Configs
     # Run "openssl rand -hex 32" in terminal to generate a real key

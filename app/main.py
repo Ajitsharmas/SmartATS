@@ -11,14 +11,18 @@ import pypdf
 
 # Background Task Imports
 from celery.result import AsyncResult  # To check status
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from sqlmodel import Session, select
 
-from app.ai import AIProvider, get_ai_provider
+from app.ai import AIProvider, GeminiUnavailableError, get_ai_provider
 from app.auth import auth_router, get_current_user
 from app.config import settings
+from app.limiter import get_user_key, limiter
 
 # Import our local modules
 from app.database import create_db_and_tables, get_session
@@ -50,6 +54,8 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # 2. MOUNT STATIC FILES
 # This tells FastAPI: "If a user asks for /static/css/style.css, look in the app/static folder."
@@ -133,6 +139,46 @@ async def health_check():
     only to verify the web container itself is alive.
     """
     return {"status": "ok", "message": "SmartATS is ready to serve 🚀"}
+
+
+@app.get("/health/ai", tags=["Infra"])
+@limiter.limit("2/minute", key_func=get_user_key)
+@limiter.limit("2/minute", key_func=get_remote_address)
+async def check_ai_health(request: Request, ai: AIDep):
+    """
+    Probe the configured AI provider (Gemini or Ollama) with a minimal prompt.
+
+    Sends a one-word prompt and checks for a coherent response. Always returns
+    HTTP 200 with a `status` field so the dashboard can display a clear human-
+    readable message regardless of outcome:
+
+    - `"ok"` — provider responded correctly
+    - `"unavailable"` — transient 503/429 from Gemini (high demand); retry later
+    - `"error"` — unexpected failure (bad API key, network issue, etc.)
+
+    This endpoint exists so that demo reviewers can distinguish between an
+    application bug and a Gemini outage.
+    """
+    try:
+        response = await ai.analyze_text("Reply with the single word: OK")
+        return {
+            "status": "ok",
+            "provider": settings.AI_MODE,
+            "message": "AI provider is online and responding correctly.",
+            "response": response,
+        }
+    except GeminiUnavailableError:
+        return {
+            "status": "unavailable",
+            "provider": settings.AI_MODE,
+            "message": "Gemini is experiencing high demand and is temporarily unavailable. This is a Google-side issue — please try again in a few minutes.",
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "provider": settings.AI_MODE,
+            "message": f"AI provider returned an unexpected error: {e}",
+        }
 
 
 # --- JOB ROUTES ---
@@ -308,7 +354,9 @@ async def analyze_resume_text(request: AnalysisRequest, ai: AIDep):
 
 # --- FILE UPLOAD ROUTES ---
 @app.post("/upload", tags=["Applications"])
+@limiter.limit("10/minute")
 async def upload_resume(
+    request: Request,
     file: UploadFile = File(...),
 ):
     """
@@ -441,7 +489,8 @@ def get_applications(
 
 # --- Processing ROUTES (The Main Workflow) ---
 @app.post("/process", tags=["Applications"])
-async def process_resume(payload: ApplicationSubmit, session: SessionDep):
+@limiter.limit("10/minute")
+async def process_resume(request: Request, payload: ApplicationSubmit, session: SessionDep):
     """
     Submit a candidate application and queue it for AI scoring. Public.
 

@@ -18,3 +18,4 @@ boto3
 passlib[bcrypt]
 aiofiles
 email-validator
+slowapi

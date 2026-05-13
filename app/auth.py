@@ -5,7 +5,7 @@
 from datetime import timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import ExpiredSignatureError, JWTError
 from pydantic import BaseModel, EmailStr
@@ -14,6 +14,7 @@ from sqlmodel import Session, select
 from resend.exceptions import ResendError
 
 from app.config import settings
+from app.limiter import limiter
 from app.database import get_session
 from app.email import send_password_reset_email, send_verification_email
 from app.models import User, UserCreate, UserPublic
@@ -48,8 +49,11 @@ class ResetPasswordRequest(BaseModel):
 # --- LOGIN ---
 
 @auth_router.post("/token", tags=["Auth"])
+@limiter.limit("10/minute")
 async def login_for_access_token(
-    form_data: Annotated[OAuth2PasswordRequestForm, Depends()], session: SessionDep
+    request: Request,
+    form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
+    session: SessionDep,
 ):
     """
     Exchange email and password for a JWT access token (OAuth2 password flow).
@@ -88,7 +92,8 @@ async def login_for_access_token(
 # --- REGISTRATION ---
 
 @auth_router.post("/register", tags=["Auth"])
-async def register_user(user_in: UserCreate, session: SessionDep):
+@limiter.limit("5/minute")
+async def register_user(request: Request, user_in: UserCreate, session: SessionDep):
     """
     Register a new recruiter account.
 
@@ -135,7 +140,8 @@ async def register_user(user_in: UserCreate, session: SessionDep):
 # --- EMAIL VERIFICATION ---
 
 @auth_router.post("/verify-email", tags=["Auth"])
-async def verify_email(payload: VerifyTokenRequest, session: SessionDep):
+@limiter.limit("20/minute")
+async def verify_email(request: Request, payload: VerifyTokenRequest, session: SessionDep):
     """
     Verify a recruiter's email address using the token from the verification email.
 
@@ -185,7 +191,8 @@ async def verify_email(payload: VerifyTokenRequest, session: SessionDep):
 # --- RESEND VERIFICATION ---
 
 @auth_router.post("/resend-verification", tags=["Auth"])
-async def resend_verification(payload: EmailOnlyRequest, session: SessionDep):
+@limiter.limit("5/minute")
+async def resend_verification(request: Request, payload: EmailOnlyRequest, session: SessionDep):
     """
     Re-send the email verification link for an unverified account.
 
@@ -231,7 +238,8 @@ async def resend_verification(payload: EmailOnlyRequest, session: SessionDep):
 # --- FORGOT PASSWORD ---
 
 @auth_router.post("/forgot-password", tags=["Auth"])
-async def forgot_password(payload: EmailOnlyRequest, session: SessionDep):
+@limiter.limit("5/minute")
+async def forgot_password(request: Request, payload: EmailOnlyRequest, session: SessionDep):
     """
     Initiate the password-reset flow for a verified recruiter account.
 
@@ -264,7 +272,8 @@ async def forgot_password(payload: EmailOnlyRequest, session: SessionDep):
 # --- RESET PASSWORD ---
 
 @auth_router.post("/reset-password", tags=["Auth"])
-async def reset_password(payload: ResetPasswordRequest, session: SessionDep):
+@limiter.limit("10/minute")
+async def reset_password(request: Request, payload: ResetPasswordRequest, session: SessionDep):
     """
     Complete the password-reset flow by setting a new password.
 
