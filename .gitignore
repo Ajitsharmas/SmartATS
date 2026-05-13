@@ -2,6 +2,7 @@
 .venv
 .env
 .env.local
+.env.prod
 __pycache__/
 test_cv.pdf
 

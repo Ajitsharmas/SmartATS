@@ -229,10 +229,16 @@ def delete_job(
     current_user: Annotated[User, Depends(get_current_user)],
 ):
     """
-    Permanently delete a job listing and all its applications. Protected.
+    Permanently delete a job listing, all its applications, and their resume
+    PDFs from MinIO storage. Protected.
 
-    The database CASCADE constraint removes every `Application` row linked
-    to this job automatically, so no orphaned records are left behind.
+    Order of operations:
+    1. Collect the MinIO S3 key from every application before deletion.
+    2. Delete the job — the CASCADE constraint removes all Application rows.
+    3. Delete each resume PDF from MinIO. This step is best-effort: a MinIO
+       failure is logged but does not roll back the DB deletion, since the
+       job and applications are already gone and retrying the DB delete would
+       be worse than leaving an orphaned file.
 
     **Errors:**
     - `401` – missing or invalid token
@@ -244,8 +250,29 @@ def delete_job(
         raise HTTPException(status_code=404, detail="Job not found.")
     if job.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to delete this job.")
-    session.delete(job)   # CASCADE removes all applications automatically
+
+    # Collect S3 keys before the CASCADE wipes the application rows
+    applications = session.exec(
+        select(Application).where(Application.job_id == job_id)
+    ).all()
+    s3_keys = [
+        app.resume_url.split("/download/")[-1]
+        for app in applications
+        if app.resume_url
+    ]
+
+    # Delete job — CASCADE removes all Application rows automatically
+    session.delete(job)
     session.commit()
+
+    # Delete resume PDFs from MinIO (best-effort — logged on failure)
+    if s3_keys:
+        s3 = get_s3_client()
+        for key in s3_keys:
+            try:
+                s3.delete_object(Bucket=settings.MINIO_BUCKET_NAME, Key=key)
+            except Exception as e:
+                print(f"Warning: failed to delete resume {key} from MinIO: {e}")
 
 
 @app.patch("/jobs/{job_id}", response_model=JobListing, tags=["Jobs"])

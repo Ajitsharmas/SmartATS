@@ -136,10 +136,27 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 
 ### Step 7 — Install Docker
 
+`docker-compose-plugin` is not available in Ubuntu's default apt sources — Docker's official repository must be added first:
+
 ```bash
-sudo apt update && sudo apt install -y docker.io docker-compose-plugin
+# Add Docker's official GPG key and repository
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Update and install
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+# Allow running docker without sudo
 sudo usermod -aG docker $USER
 newgrp docker
+```
+
+Verify:
+```bash
+docker --version
+docker compose version
 ```
 
 ### Step 8 — Get the code
@@ -186,11 +203,90 @@ See [https-ssl.md](https-ssl.md) for the full process.
 
 ---
 
-## GCP firewall for DBeaver (optional)
+## GCP Firewall — IP Restrictions
 
-To connect DBeaver to the production Postgres, add a GCP firewall rule for port 5432 — but restrict the source to **your own IP only**, never `0.0.0.0/0`:
+### Find your current public IP
 
-GCP Console → **VPC Network → Firewall → Create Rule**
-- Direction: Ingress, Action: Allow
-- Source IP: your home/office IP only
-- Protocol: TCP, Port: 5432
+Run this before configuring any firewall rule:
+
+```bash
+curl ifconfig.me
+```
+
+> **Note:** Home and office IPs are usually dynamic — your ISP can reassign them. If your app or DBeaver suddenly becomes unreachable, your IP has likely changed. Run `curl ifconfig.me` again and update the relevant firewall rule in GCP Console.
+
+---
+
+### Option A — Restrict only the database and MinIO ports (recommended for demos)
+
+This keeps the app publicly accessible at `smartats.xyz` so interviewers can reach it, but prevents anyone from connecting directly to Postgres or MinIO from outside.
+
+Create **two** firewall rules — one for Postgres and one for MinIO:
+
+**Rule 1 — Postgres (DBeaver access)**
+
+GCP Console → **VPC Network → Firewall → Create Firewall Rule**
+
+| Field | Value |
+|---|---|
+| Name | `allow-postgres-myip` |
+| Direction | Ingress |
+| Action | Allow |
+| Targets | All instances in the network |
+| Source IP ranges | `YOUR_IP/32` |
+| Protocols and ports | TCP, port `5432` |
+
+**Rule 2 — MinIO console and API**
+
+GCP Console → **VPC Network → Firewall → Create Firewall Rule**
+
+| Field | Value |
+|---|---|
+| Name | `allow-minio-myip` |
+| Direction | Ingress |
+| Action | Allow |
+| Targets | All instances in the network |
+| Source IP ranges | `YOUR_IP/32` |
+| Protocols and ports | TCP, ports `9000,9001` |
+
+The `/32` means exactly that single IP address — no other machine can reach these ports.
+
+**DBeaver connection settings:**
+
+| Field | Value |
+|---|---|
+| Host | `YOUR_GCP_STATIC_IP` |
+| Port | `5432` |
+| Database | `resume_db` |
+| Username | `resume_user` |
+| Password | *(whatever you set in `.env`)* |
+
+**MinIO console:**
+
+Open `http://YOUR_GCP_STATIC_IP:9001` in your browser. Login with the `MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY` values from your `.env`.
+
+---
+
+### Option B — Restrict the entire app to your IP only
+
+Use this if you want the app completely private during development — no one except you can reach it at all.
+
+Find the existing HTTP/HTTPS firewall rules:
+
+GCP Console → **VPC Network → Firewall** → look for `default-allow-http` and any HTTPS rule.
+
+Edit each one and change:
+- **Source IP ranges:** `0.0.0.0/0` → `YOUR_IP/32`
+
+Do this for both port 80 and port 443.
+
+To open access back up to everyone (e.g. when showing an interviewer), change the source IP ranges back to `0.0.0.0/0`.
+
+---
+
+### Comparison
+
+| Approach | App accessible to public | DB + MinIO accessible to public | Best for |
+|---|---|---|---|
+| Option A (DB + MinIO only) | Yes | No — your IP only | Demo purposes |
+| Option B (full restrict) | No — your IP only | No — your IP only | Private development / testing |
