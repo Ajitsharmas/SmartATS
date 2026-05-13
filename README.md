@@ -4,6 +4,54 @@ An AI-powered Applicant Tracking System built with FastAPI, Celery, and Google G
 
 ---
 
+## Architecture
+
+```mermaid
+graph TB
+    subgraph CLIENTS["Clients"]
+        BR["Browser\n──────────\nRecruiter · Candidate"]
+    end
+
+    subgraph VM["GCP e2-micro VM · Docker Compose"]
+        direction TB
+        NGX["Nginx\n──────────\nPort 80 · 443\nReverse Proxy\nSSL Termination\nRate Limiting"]
+
+        subgraph APP["Application"]
+            API["FastAPI\n──────────\nPort 8000\nREST API\nAuth\nFile Handling"]
+            WRK["Celery Worker\n──────────\nAI Scoring\nEmail Dispatch"]
+        end
+
+        subgraph DATA["Data"]
+            RDS[("Redis\n──────────\nPort 6379\nTask Broker\nRate Limit Store")]
+            PG[("PostgreSQL\n──────────\nPort 5432\nJobs · Users\nApplications")]
+            MIO[("MinIO\n──────────\nPort 9000 · 9001\nResume PDF Storage")]
+        end
+
+        CTB["Certbot\n──────────\nSSL Renewal"]
+    end
+
+    subgraph EXT["External Services"]
+        GEM["Google Gemini\n──────────\nAI Resume Scoring"]
+        SND["Resend\n──────────\nTransactional Email"]
+        LEX["Let's Encrypt\n──────────\nCertificate Authority"]
+    end
+
+    BR --- NGX
+    NGX --- API
+    API --- RDS
+    API --- PG
+    API --- MIO
+    API --- SND
+    RDS --- WRK
+    WRK --- PG
+    WRK --- GEM
+    WRK --- SND
+    NGX --- CTB
+    CTB --- LEX
+```
+
+---
+
 ## Documentation
 
 | Topic | Description |
