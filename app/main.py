@@ -32,7 +32,12 @@ from app.models import AnalysisRequest, Application, ApplicationSubmit, JobListi
 from app.utils import get_s3_client, init_storage
 from sqlalchemy.exc import IntegrityError
 
-from app.worker import analyze_resume_task, celery_app, rescore_application_task
+from app.worker import (
+    analyze_resume_task,
+    celery_app,
+    embed_resume_task,
+    rescore_application_task,
+)
 
 
 # 1. LIFESPAN CONTEXT MANAGER
@@ -514,6 +519,74 @@ def get_applications(
     return results
 
 
+@app.post("/applications/{application_id}/retry", tags=["Applications"])
+def retry_application(
+    application_id: int,
+    session: SessionDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    """
+    Re-dispatch failed Celery tasks for an application. Protected.
+
+    When a task (scoring or embedding) exhausts its Celery retries, the
+    `on_failure` hook records the error in `scoring_error` or
+    `embedding_error` and sets the application status to `"failed"`. This
+    endpoint lets the recruiter re-trigger the failed task(s) from the
+    dashboard:
+
+    1. Looks at `scoring_error` and `embedding_error` to determine what failed
+    2. Fetches the stored PDF from MinIO and re-extracts text (since we don't
+       persist the extracted text)
+    3. Re-dispatches `analyze_resume_task` and/or `embed_resume_task` as needed
+    4. Clears the corresponding error columns and resets status to `"pending"`
+
+    **Errors:**
+    - `401` – missing or invalid token
+    - `403` – the parent job belongs to a different recruiter
+    - `404` – application not found
+    - `400` – application is not in a failed state (nothing to retry)
+    """
+    app_record = session.get(Application, application_id)
+    if not app_record:
+        raise HTTPException(status_code=404, detail="Application not found.")
+
+    # Confirm the recruiter owns the parent job
+    job = session.get(JobListing, app_record.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Parent job not found.")
+    if job.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized.")
+
+    if not app_record.scoring_error and not app_record.embedding_error:
+        raise HTTPException(status_code=400, detail="Nothing to retry — no failed tasks.")
+
+    # Re-extract resume text from MinIO. We don't persist the extracted text;
+    # the canonical source is the PDF, so we fetch and re-extract.
+    s3_key = app_record.resume_url.split("/download/")[-1]
+    try:
+        s3 = get_s3_client()
+        obj = s3.get_object(Bucket=settings.MINIO_BUCKET_NAME, Key=s3_key)
+        pdf_bytes = obj["Body"].read()
+        pdf_reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        text_content = "".join(page.extract_text() or "" for page in pdf_reader.pages)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not re-read resume from storage: {e}")
+
+    if app_record.scoring_error:
+        analyze_resume_task.delay(text_content=text_content, application_id=application_id)
+        app_record.scoring_error = None
+
+    if app_record.embedding_error:
+        embed_resume_task.delay(text_content=text_content, application_id=application_id)
+        app_record.embedding_error = None
+
+    app_record.status = "pending"
+    session.add(app_record)
+    session.commit()
+
+    return {"message": "Retry dispatched", "application_id": application_id}
+
+
 # --- Processing ROUTES (The Main Workflow) ---
 @app.post("/process", tags=["Applications"])
 @limiter.limit("10/minute")
@@ -559,16 +632,22 @@ async def process_resume(request: Request, payload: ApplicationSubmit, session: 
             detail="You have already applied for this posting. Multiple applications are not allowed for the same job.",
         )
 
-    # B. Trigger Worker
-    # CRITICAL: We pass the 'application_id' (app_record.id) to the worker.
-    # This allows the worker to "call us back" (update the DB) when it finishes.
-    task = analyze_resume_task.delay(
+    # B. Trigger Workers — scoring and embedding run in PARALLEL.
+    # The two tasks are independent: scoring uses Gemini text completion to
+    # produce a score+critique; embedding uses Gemini's embedding model to
+    # populate pgvector for semantic search / RAG (Phase 1+).
+    # Running them in parallel means the recruiter sees the final score
+    # sooner, and a failure in one doesn't block the other.
+    scoring_task = analyze_resume_task.delay(
+        text_content=payload.request.text, application_id=app_record.id
+    )
+    embed_resume_task.delay(
         text_content=payload.request.text, application_id=app_record.id
     )
 
     return {
         "message": "Application received",
-        "task_id": task.id,
+        "task_id": scoring_task.id,
         "application_id": app_record.id,
     }
 

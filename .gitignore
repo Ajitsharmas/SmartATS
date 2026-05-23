@@ -9,3 +9,6 @@ test_cv.pdf
 # gcloud SDK — accidentally installed inside project directory
 gcloud/
 exec -l /
+
+# Personal study notes — not part of project documentation
+notes/

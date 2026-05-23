@@ -19,3 +19,10 @@ passlib[bcrypt]
 aiofiles
 email-validator
 slowapi
+
+# AI / RAG dependencies (Phase 0+)
+langchain
+langchain-core
+langchain-google-genai
+langchain-postgres
+pgvector

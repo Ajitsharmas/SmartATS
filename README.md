@@ -66,3 +66,6 @@ An AI-powered Applicant Tracking System built with FastAPI, Celery, and Google G
 | [Deployment — GCP](docs/deployment-gcp.md) | Step-by-step GCP Compute Engine free-tier deployment, static IP billing rules, swap space, DB migration, DBeaver firewall |
 | [HTTPS / Let's Encrypt](docs/https-ssl.md) | Certbot + Nginx SSL setup, `setup-ssl.sh` usage, certificate auto-renewal, nginx config details |
 | [Scaling Workers](docs/scaling-workers.md) | How to scale Celery workers under resume processing load, concurrency tuning, memory limits on e2-micro, when to upgrade the VM |
+| [AI Features Roadmap](docs/ai-features/roadmap.md) | Planned RAG / semantic search / agent features, shared pgvector infrastructure, implementation phases, free-tier compatibility |
+| [AI Phase 0 — Foundation](docs/ai-features/phase-0-foundation.md) | pgvector setup, embedding tables, ORM choice (SQLModel + drop-down to SQLAlchemy), Gemini embeddings client, smoke test |
+| [AI Phase 1 — Embedding Pipeline + Task Recovery](docs/ai-features/phase-1-embedding-pipeline.md) | Resume chunking, embedding Celery task, parallel dispatch, manual retry mechanism for failed tasks (retrofitted to all existing tasks) |

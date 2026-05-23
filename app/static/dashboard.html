@@ -233,6 +233,26 @@
                     if(app.ai_score >= 80) scoreClass = "bg-emerald-100 text-emerald-700";
                     else if(app.ai_score >= 50) scoreClass = "bg-amber-100 text-amber-700";
 
+                    // Status cell — show a red dot for failed, plain text otherwise.
+                    // Hover/title reveals the error message(s) for debugging.
+                    const isFailed = app.status === 'failed';
+                    let statusCell;
+                    if (isFailed) {
+                        const errors = [app.scoring_error, app.embedding_error].filter(Boolean).join(' | ');
+                        statusCell = `
+                            <span class="inline-flex items-center gap-1.5 text-xs font-semibold uppercase text-red-700" title="${errors.replace(/"/g, '&quot;')}">
+                                <span class="w-2 h-2 rounded-full bg-red-500"></span>
+                                Failed
+                            </span>`;
+                    } else {
+                        statusCell = `<span class="text-xs font-mono uppercase text-slate-500">${app.status}</span>`;
+                    }
+
+                    // Action cell — Retry button if failed, View Analysis otherwise
+                    const actionCell = isFailed
+                        ? `<button onclick="retryApp(${app.id})" class="text-red-600 hover:text-red-800 text-sm font-medium border border-red-200 px-3 py-1 rounded hover:bg-red-50 transition">Retry</button>`
+                        : `<button onclick="viewAts(${app.id})" class="text-indigo-600 hover:text-indigo-800 text-sm font-medium border border-indigo-200 px-3 py-1 rounded hover:bg-indigo-50 transition">View Analysis</button>`;
+
                     return `
                     <tr class="hover:bg-slate-50 transition group border-b border-slate-50">
                         <td class="py-4 pl-2">
@@ -243,12 +263,10 @@
                             <div class="text-xs text-slate-400">${app.candidate_email}</div>
                         </td>
                         <td class="py-4">
-                            <span class="text-xs font-mono uppercase text-slate-500">${app.status}</span>
+                            ${statusCell}
                         </td>
                         <td class="py-4 text-right pr-2">
-                            <button onclick="viewAts(${app.id})" class="text-indigo-600 hover:text-indigo-800 text-sm font-medium border border-indigo-200 px-3 py-1 rounded hover:bg-indigo-50 transition">
-                                View Analysis
-                            </button>
+                            ${actionCell}
                         </td>
                     </tr>
                 `;
@@ -258,7 +276,18 @@
             }
         };
 
-        // 3. View Ats (Safe Lookup)
+        // 3a. Retry a failed application's pending tasks
+        window.retryApp = async (appId) => {
+            try {
+                await Api.retryApplication(appId);
+                showModal('Retry dispatched. Refresh in a few seconds to see updated status.', 'success');
+                refreshApplicants();
+            } catch (e) {
+                // error modal already shown by Api.request
+            }
+        };
+
+        // 3b. View Ats (Safe Lookup)
         window.viewAts = (appId) => {
             // Retrieve object from memory, NOT from HTML
             const app = applicationMap[appId];

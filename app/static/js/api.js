@@ -219,6 +219,10 @@ class Api {
         return await this.request(`/applications/${jobId}`);
     }
 
+    static async retryApplication(applicationId) {
+        return await this.request(`/applications/${applicationId}/retry`, "POST");
+    }
+
     static async uploadResume(file) {
         if (!(file instanceof File)) {
             showModal("Please upload your resume (PDF) before submitting.");

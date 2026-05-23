@@ -10,8 +10,11 @@ from pydantic import (
     EmailStr,
     field_validator,
 )  # Added EmailStr for robust validation
-from sqlalchemy import Column, Integer, ForeignKey
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import Column, Integer, ForeignKey, Text
 from sqlmodel import Field, SQLModel, UniqueConstraint
+
+from app.config import settings
 
 
 # --- JOB LISTING MODELS ---
@@ -162,7 +165,12 @@ class Application(SQLModel, table=True):
     # AI Results (Populated by the Celery Worker)
     ai_score: int = 0
     ai_critique: Optional[str] = None
-    status: str = "pending"  # pending -> processed
+    status: str = "pending"  # pending -> processed | pending -> failed -> pending (after retry)
+
+    # Failure tracking (populated by Celery task on_failure hooks when retries exhaust).
+    # When either is non-null, status becomes "failed" and the dashboard offers a Retry button.
+    scoring_error: Optional[str] = None
+    embedding_error: Optional[str] = None
 
     created_at: datetime = Field(default_factory=datetime.now)
 
@@ -183,3 +191,62 @@ class JobListingUpdate(SQLModel):
         if value.strip().startswith("-"):
             raise ValueError("Salary cannot be negative.")
         return value
+
+
+# --- EMBEDDING MODELS (Phase 0) ---
+#
+# These tables store vector embeddings of resume chunks and job description
+# chunks for use in semantic search, RAG Q&A, and cross-job matching.
+# The HNSW indexes on the `embedding` column are created at startup in
+# `app/database.py` because SQLModel cannot express them declaratively.
+
+
+class ResumeEmbedding(SQLModel, table=True):
+    """
+    A single embedded chunk of a candidate's resume.
+    Multiple rows per application — the resume is split into ~10 chunks.
+    """
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    # CASCADE: when an application is deleted, its embeddings are deleted too
+    application_id: int = Field(
+        sa_column=Column(Integer, ForeignKey("application.id", ondelete="CASCADE"), nullable=False, index=True)
+    )
+
+    chunk_index: int  # 0, 1, 2... position within the resume
+
+    # Original text — needed to return as RAG context to the LLM
+    chunk_text: str = Field(sa_column=Column(Text, nullable=False))
+
+    # The embedding vector. SQLModel cannot express pgvector types natively,
+    # so we drop down to raw SQLAlchemy with the Vector column type.
+    embedding: list[float] = Field(
+        sa_column=Column(Vector(settings.EMBEDDING_DIMENSIONS), nullable=False)
+    )
+
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class JobEmbedding(SQLModel, table=True):
+    """
+    A single embedded chunk of a job description.
+    Multiple rows per job — long job descriptions are chunked just like resumes.
+    """
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    # CASCADE: when a job is deleted, its embeddings are deleted too
+    job_id: int = Field(
+        sa_column=Column(Integer, ForeignKey("joblisting.id", ondelete="CASCADE"), nullable=False, index=True)
+    )
+
+    chunk_index: int
+
+    chunk_text: str = Field(sa_column=Column(Text, nullable=False))
+
+    embedding: list[float] = Field(
+        sa_column=Column(Vector(settings.EMBEDDING_DIMENSIONS), nullable=False)
+    )
+
+    created_at: datetime = Field(default_factory=datetime.now)

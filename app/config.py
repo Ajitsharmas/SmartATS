@@ -48,6 +48,18 @@ class Settings(BaseSettings):
     FROM_EMAIL: str = "SmartATS <onboarding@resend.dev>"
     APP_BASE_URL: str = "http://localhost:8000"
 
+    # AI Embeddings Config (Phase 0)
+    # gemini-embedding-001 supports configurable output dimensions; we ask for 768
+    # to keep storage compact and match common defaults across embedding models.
+    EMBEDDING_MODEL: str = "models/gemini-embedding-001"
+    EMBEDDING_DIMENSIONS: int = 768
+
+    # Chunking strategy (used in Phase 1)
+    RESUME_CHUNK_SIZE: int = 500       # characters
+    RESUME_CHUNK_OVERLAP: int = 50
+    JOB_CHUNK_SIZE: int = 500
+    JOB_CHUNK_OVERLAP: int = 50
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 # Initialize settings

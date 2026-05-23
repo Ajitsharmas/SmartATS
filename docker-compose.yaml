@@ -6,9 +6,9 @@
 name: smartats
 
 services:
-  # 1. The Postgres Database
+  # 1. The Postgres Database (with pgvector extension preinstalled)
   db:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg15
     restart: always
     env_file:
       - .env
