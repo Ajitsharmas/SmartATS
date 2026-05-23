@@ -8,7 +8,7 @@ import json
 
 import pypdf
 from celery import Celery, Task
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sqlmodel import Session, select
 
 from app.ai import get_ai_provider, GeminiUnavailableError

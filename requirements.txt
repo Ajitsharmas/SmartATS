@@ -23,6 +23,7 @@ slowapi
 # AI / RAG dependencies (Phase 0+)
 langchain
 langchain-core
+langchain-text-splitters
 langchain-google-genai
 langchain-postgres
 pgvector
