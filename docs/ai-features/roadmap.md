@@ -6,9 +6,9 @@ High-level scope of the AI/RAG features planned for SmartATS. Detailed requireme
 
 ## Goals
 
-1. **Add genuine user value** — features that make the recruiter's workflow meaningfully faster, not tech demos.
-2. **Cover modern AI/LLM skills** — RAG, embeddings, vector databases, LLM orchestration — all of which appear consistently in modern backend job descriptions.
-3. **Stay on the GCP / Gemini free tier** — no new paid infrastructure.
+1. **Genuine user value** — features that make the recruiter's workflow meaningfully faster.
+2. **Modern AI/LLM patterns applied to real problems** — RAG, embeddings, vector databases, and LLM orchestration used where they solve a real recruiter need, not as bolt-ons.
+3. **Stay on the GCP / Gemini free tier** — no new paid infrastructure for the default deployment.
 
 ---
 
@@ -63,12 +63,12 @@ A conversational agent on the dashboard that helps recruiters complete multi-ste
 
 **Why this is deferred until 1–3 are complete:** the agent's tools *are* features 1–3. Building it before they exist would be wasted scaffolding.
 
-**Why it's worth doing later:** this single feature covers **tool calling**, **multi-step reasoning**, **LangChain or LangGraph agents** — directly relevant to AI-focused JDs like *AI Engineer — Foundational Agents* or *Duo Chat*. Adds the buzzword "agent" to your resume in a defensible, substantive way.
+**Why it's the right capstone for the AI features:** the agent is the natural top of the stack — its tools *are* Features 1–3, so once those exist, exposing them as an orchestrated agent unlocks multi-step workflows recruiters cannot otherwise perform in a single action. It also demonstrates the modern agent pattern (tool calling, multi-step reasoning) using the LangChain / LangGraph ecosystem.
 
 **Free tier compatibility:**
 - Gemini 2.5 Flash supports function calling / tool use natively — no extra API tier needed
 - Each agent invocation uses 3–5 LLM calls on average (one per reasoning step)
-- Free tier allows 1500 LLM requests/day → ~300–500 agent invocations/day, more than enough for demo and personal use
+- Free tier allows 1500 LLM requests/day → ~300–500 agent invocations/day, sufficient for typical recruiter usage
 - No new infrastructure — runs in the existing web/worker containers
 
 ---
@@ -104,7 +104,7 @@ Building this foundation once enables all three features.
 
 ## Constraints
 
-- **Free-tier only.** `gemini-2.5-flash` (15 RPM, 1500 requests/day) and `gemini-embedding-001` (1500 RPM) are sufficient for demo and modest real-world usage.
+- **Free-tier only.** `gemini-2.5-flash` (15 RPM, 1500 requests/day) and `gemini-embedding-001` (1500 RPM) are sufficient for small-scale deployments. Paid tiers remove these caps when needed at higher load.
 - **No new paid infrastructure.** pgvector runs inside the existing Postgres container.
 - **Graceful degradation.** If Gemini is unavailable, the app must still function — search and matching should return the existing keyword-based results as a fallback, and Q&A should display a clear error.
 

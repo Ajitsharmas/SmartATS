@@ -223,6 +223,34 @@ class Api {
         return await this.request(`/applications/${applicationId}/retry`, "POST");
     }
 
+    // Phase 2 — Semantic search across the recruiter's applicant pool.
+    // Returns { results: [...], total_returned, has_more }.
+    static async searchCandidates(query, offset = 0, limit = 10) {
+        return await this.request("/search/candidates", "POST", {
+            query: query,
+            limit: limit,
+            offset: offset,
+        });
+    }
+
+    // Phase 3 — Cross-job match suggestions
+    // List the alternative jobs a candidate's resume also matches well.
+    static async getMatches(applicationId) {
+        return await this.request(`/applications/${applicationId}/matches`);
+    }
+
+    // Recompute matches for a single candidate. Returns immediately —
+    // task runs asynchronously in Celery.
+    static async refreshMatches(applicationId) {
+        return await this.request(`/applications/${applicationId}/match-refresh`, "POST");
+    }
+
+    // Bulk-recompute matches for every candidate in the recruiter's pool.
+    // Rate-limited to 2/hour because it queues a task per application.
+    static async refreshAllMatches() {
+        return await this.request("/matches/refresh-all", "POST");
+    }
+
     static async uploadResume(file) {
         if (!(file instanceof File)) {
             showModal("Please upload your resume (PDF) before submitting.");

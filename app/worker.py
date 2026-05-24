@@ -9,6 +9,7 @@ import json
 import pypdf
 from celery import Celery, Task
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from sqlalchemy import text
 from sqlmodel import Session, select
 
 from app.ai import get_ai_provider, GeminiUnavailableError
@@ -16,7 +17,13 @@ from app.config import settings
 from app.database import engine
 from app.email import send_application_scored_email
 from app.embeddings import EmbeddingError, embed_texts
-from app.models import Application, JobListing, ResumeEmbedding
+from app.models import (
+    Application,
+    CrossJobMatch,
+    JobEmbedding,
+    JobListing,
+    ResumeEmbedding,
+)
 from app.utils import get_s3_client
 
 # 1. Initialize Celery
@@ -74,6 +81,35 @@ class ScoringTask(TaskWithFailureTracking):
 
 class EmbeddingTask(TaskWithFailureTracking):
     error_column = "embedding_error"
+
+
+class MatchingTask(TaskWithFailureTracking):
+    """Marks Application.matching_error when cross-job matching exhausts retries."""
+    error_column = "matching_error"
+
+
+class JobEmbeddingTask(Task):
+    """
+    Failure tracking for embed_job_task. Writes to JobListing.embedding_error
+    (rather than Application's error columns) so an embedding failure does
+    not falsely mark every applicant for this job as failed.
+    """
+
+    def on_failure(self, exc, task_id, args, kwargs, einfo):
+        job_id = kwargs.get("job_id")
+        if job_id is None and args:
+            job_id = args[-1]
+        if job_id is None:
+            print(f"Worker: on_failure could not resolve job_id (args={args}, kwargs={kwargs})")
+            return
+
+        with Session(engine) as session:
+            job = session.get(JobListing, job_id)
+            if job:
+                job.embedding_error = str(exc)
+                session.add(job)
+                session.commit()
+                print(f"Worker: marked Job {job_id} as embedding_failed ({exc})")
 
 
 # ---------------------------------------------------------------------------
@@ -274,3 +310,180 @@ def embed_resume_task(text_content: str, application_id: int) -> dict:
         print(f"Worker: stored {len(chunks)} embeddings for App {application_id}")
 
     return {"status": "success", "chunks": len(chunks)}
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — embed job description for cross-job matching (Phase 3)
+# ---------------------------------------------------------------------------
+# Triggered on job creation and on edits that change scoring-relevant fields.
+# Same chunking + batched embedding pattern as embed_resume_task, but for
+# JobListing rows and writing into the jobembedding table.
+@celery_app.task(
+    base=JobEmbeddingTask,
+    name="embed_job_task",
+    autoretry_for=(EmbeddingError,),
+    retry_backoff=True,
+    retry_backoff_max=60,
+    max_retries=4,
+)
+def embed_job_task(job_id: int) -> dict:
+    print(f"Worker: Embedding Job ID {job_id}...")
+
+    # 1. Pull the job description text + skills (skills add useful context)
+    with Session(engine) as session:
+        job = session.get(JobListing, job_id)
+        if not job:
+            raise ValueError(f"Job {job_id} not found")
+        text_content = f"{job.title}\n\n{job.description}\n\nRequired skills: {job.skills}\n\nLocation: {job.location}"
+
+    if len(text_content.strip()) < 50:
+        print(f"Worker: Skipping Job {job_id} embedding — text too short")
+        return {"status": "skipped", "reason": "text too short"}
+
+    # 2. Idempotency: clear any existing chunks for this job
+    with Session(engine) as session:
+        existing = session.exec(
+            select(JobEmbedding).where(JobEmbedding.job_id == job_id)
+        ).all()
+        for row in existing:
+            session.delete(row)
+        if existing:
+            session.commit()
+            print(f"Worker: cleared {len(existing)} existing chunks for Job {job_id}")
+
+    # 3. Chunk
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=settings.JOB_CHUNK_SIZE,
+        chunk_overlap=settings.JOB_CHUNK_OVERLAP,
+    )
+    chunks = splitter.split_text(text_content)
+    print(f"Worker: split Job {job_id} into {len(chunks)} chunks")
+
+    # 4. Batch-embed
+    vectors = embed_texts(chunks)
+
+    # 5. Insert + clear any previous embedding_error on the job
+    with Session(engine) as session:
+        for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
+            session.add(JobEmbedding(
+                job_id=job_id,
+                chunk_index=i,
+                chunk_text=chunk,
+                embedding=vector,
+            ))
+        job = session.get(JobListing, job_id)
+        if job:
+            job.embedding_error = None
+            session.add(job)
+        session.commit()
+        print(f"Worker: stored {len(chunks)} embeddings for Job {job_id}")
+
+    return {"status": "success", "chunks": len(chunks)}
+
+
+# ---------------------------------------------------------------------------
+# Task 5 — compute cross-job matches for a single application (Phase 3)
+# ---------------------------------------------------------------------------
+# Runs the top-3-chunk average aggregation SQL described in
+# docs/ai-features/phase-3-cross-job-matching.md. Pure pgvector + SQL — no
+# external API calls. Idempotent: deletes existing matches for the
+# application, then inserts fresh ones.
+
+CROSS_JOB_MATCH_SQL = """
+WITH chunk_pairs AS (
+    SELECT
+        je.job_id,
+        re.id AS resume_chunk_id,
+        1 - (re.embedding <=> je.embedding) AS pair_similarity
+    FROM resumeembedding re
+    JOIN application a   ON a.id = re.application_id
+    JOIN joblisting orig ON orig.id = a.job_id
+    JOIN joblisting cand ON cand.owner_id = orig.owner_id
+                        AND cand.id != orig.id
+    JOIN jobembedding je ON je.job_id = cand.id
+    WHERE a.id = :application_id
+),
+best_per_resume_chunk AS (
+    SELECT job_id, resume_chunk_id, MAX(pair_similarity) AS best_similarity
+    FROM chunk_pairs
+    GROUP BY job_id, resume_chunk_id
+),
+ranked_chunks AS (
+    SELECT
+        job_id,
+        best_similarity,
+        ROW_NUMBER() OVER (
+            PARTITION BY job_id
+            ORDER BY best_similarity DESC
+        ) AS chunk_rank
+    FROM best_per_resume_chunk
+)
+SELECT
+    job_id,
+    AVG(best_similarity) AS aggregate_similarity
+FROM ranked_chunks
+WHERE chunk_rank <= :top_k
+GROUP BY job_id
+HAVING AVG(best_similarity) >= :min_similarity
+ORDER BY aggregate_similarity DESC
+LIMIT :top_n
+"""
+
+MATCH_TOP_K_CHUNKS = 3       # top-3 chunk average (Option C)
+MATCH_MIN_SIMILARITY = 0.7   # threshold for surfacing a match
+MATCH_TOP_N_JOBS = 3         # at most 3 suggested alternative jobs
+
+
+@celery_app.task(
+    base=MatchingTask,
+    name="match_jobs_task",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_backoff_max=30,
+    max_retries=1,             # one retry catches transient DB issues; real bugs propagate to on_failure
+)
+def match_jobs_task(application_id: int) -> dict:
+    print(f"Worker: Computing cross-job matches for App ID {application_id}...")
+
+    with Session(engine) as session:
+        rows = session.execute(
+            text(CROSS_JOB_MATCH_SQL),
+            {
+                "application_id": application_id,
+                "top_k": MATCH_TOP_K_CHUNKS,
+                "min_similarity": MATCH_MIN_SIMILARITY,
+                "top_n": MATCH_TOP_N_JOBS,
+            },
+        ).fetchall()
+
+        # Idempotency: clear existing matches for this application before inserting
+        existing = session.exec(
+            select(CrossJobMatch).where(CrossJobMatch.application_id == application_id)
+        ).all()
+        for row in existing:
+            session.delete(row)
+        if existing:
+            session.commit()
+
+        for row in rows:
+            session.add(CrossJobMatch(
+                application_id=application_id,
+                matched_job_id=row.job_id,
+                similarity=float(row.aggregate_similarity),
+            ))
+
+        # Clear matching_error on the application if it was set
+        app_record = session.get(Application, application_id)
+        if app_record:
+            app_record.matching_error = None
+            # If all error columns are now clear and status was failed, restore it
+            if (app_record.status == "failed"
+                and app_record.scoring_error is None
+                and app_record.embedding_error is None):
+                app_record.status = "processed" if app_record.ai_score else "pending"
+            session.add(app_record)
+
+        session.commit()
+
+    print(f"Worker: stored {len(rows)} cross-job matches for App {application_id}")
+    return {"status": "success", "matches": len(rows)}

@@ -24,8 +24,31 @@
     </nav>
 
     <main class="max-w-7xl mx-auto p-8 flex gap-8">
-        
+
         <div class="w-1/3">
+            <!-- Semantic search box (Phase 2) — searches across the recruiter's
+                 entire applicant pool, not just one job's applicants. -->
+            <form id="searchForm" class="mb-6">
+                <div class="relative">
+                    <input type="text" id="searchInput" placeholder="Search candidates semantically…"
+                        class="w-full pl-10 pr-10 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition text-sm">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                    <button type="button" id="searchClearBtn" class="hidden absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600" title="Clear search">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    </button>
+                </div>
+                <p class="text-xs text-slate-400 mt-1.5">e.g. "Python engineer with cloud experience"</p>
+            </form>
+
+            <!-- Phase 3 — bulk recheck of cross-job matches for every applicant.
+                 Rate-limited 2/hour. Queues one match_jobs_task per application. -->
+            <div class="mb-6">
+                <button id="rematchAllBtn" class="w-full text-xs font-medium text-slate-500 hover:text-indigo-600 border border-slate-200 hover:border-indigo-300 rounded-lg py-2 transition flex items-center justify-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v6h-6"/></svg>
+                    Re-check job matches for all applicants
+                </button>
+            </div>
+
             <div class="flex justify-between items-center mb-6">
                 <h2 class="text-xl font-bold text-slate-800">Your Jobs</h2>
                 <button onclick="openCreateModal()" class="bg-indigo-600 text-white p-2 rounded-lg hover:bg-indigo-700"><i data-lucide="plus" class="w-5 h-5"></i></button>
@@ -39,6 +62,38 @@
             <div id="emptyState" class="h-full flex flex-col items-center justify-center text-slate-400">
                 <i data-lucide="bar-chart-2" class="w-12 h-12 mb-2 opacity-50"></i>
                 <p>Select a job to view ranked applicants</p>
+            </div>
+
+            <!-- Search results view (Phase 2) — shown when the recruiter runs a semantic search. -->
+            <div id="searchView" class="hidden">
+                <div class="flex justify-between items-end mb-6 border-b border-slate-100 pb-4">
+                    <div>
+                        <h3 class="text-2xl font-bold text-slate-800">Search Results</h3>
+                        <p id="searchQueryEcho" class="text-sm text-slate-500"></p>
+                    </div>
+                    <button onclick="exitSearchMode()" class="text-xs font-mono bg-slate-100 hover:bg-slate-200 px-3 py-1 rounded text-slate-600 transition cursor-pointer">
+                        ✕ Close
+                    </button>
+                </div>
+
+                <div id="searchResultsList" class="space-y-3">
+                    <!-- Populated by performSearch() -->
+                </div>
+
+                <div id="searchResultsLoading" class="hidden text-center py-8 text-slate-400">
+                    <div class="loader mx-auto mb-2"></div>
+                    Searching…
+                </div>
+
+                <div id="searchResultsEmpty" class="hidden text-center py-8 text-slate-400 text-sm">
+                    No candidates matched this query above the relevance threshold.
+                </div>
+
+                <div id="searchShowMoreWrap" class="hidden mt-4 text-center">
+                    <button id="searchShowMoreBtn" class="text-sm font-medium text-indigo-600 hover:text-indigo-800 border border-indigo-200 px-4 py-1.5 rounded hover:bg-indigo-50 transition">
+                        Show more
+                    </button>
+                </div>
             </div>
 
             <div id="applicantView" class="hidden">
@@ -98,7 +153,21 @@
             
             <div class="bg-slate-50 p-6 rounded-lg border border-slate-100 text-slate-700 leading-relaxed max-h-96 overflow-y-auto whitespace-pre-wrap font-mono text-sm" id="atsContent">
                 </div>
-            
+
+            <!-- Phase 3 — Cross-job match suggestions for this candidate.
+                 Populated by loadMatchesForModal() when the modal opens. -->
+            <div class="mt-6 pt-6 border-t border-slate-100">
+                <div class="flex justify-between items-center mb-3">
+                    <h3 class="text-sm font-bold text-slate-700">Also a good fit for</h3>
+                    <button id="atsRematchBtn" class="text-xs font-medium text-slate-500 hover:text-indigo-600 transition">
+                        ↻ Re-check matches
+                    </button>
+                </div>
+                <div id="atsMatchesList" class="space-y-2 text-sm">
+                    <!-- Populated dynamically -->
+                </div>
+            </div>
+
             <div class="mt-6 flex justify-end space-x-3">
                 <a id="downloadResume" href="#" target="_blank" class="px-4 py-2 bg-white border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 font-medium">Download Resume</a>
                 <button onclick="document.getElementById('atsModal').classList.add('hidden')" class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium">Close</button>
@@ -238,7 +307,7 @@
                     const isFailed = app.status === 'failed';
                     let statusCell;
                     if (isFailed) {
-                        const errors = [app.scoring_error, app.embedding_error].filter(Boolean).join(' | ');
+                        const errors = [app.scoring_error, app.embedding_error, app.matching_error].filter(Boolean).join(' | ');
                         statusCell = `
                             <span class="inline-flex items-center gap-1.5 text-xs font-semibold uppercase text-red-700" title="${errors.replace(/"/g, '&quot;')}">
                                 <span class="w-2 h-2 rounded-full bg-red-500"></span>
@@ -259,7 +328,11 @@
                             <span class="font-bold text-sm px-2 py-1 rounded ${scoreClass}">${app.ai_score}</span>
                         </td>
                         <td class="py-4">
-                            <div class="font-bold text-slate-700">${app.candidate_name}</div>
+                            <div class="font-bold text-slate-700">
+                                ${app.candidate_name}
+                                <!-- Phase 3 — cross-job match badge, filled in by populateMatchBadges() -->
+                                <span class="match-badge hidden ml-2 text-[10px] font-semibold text-indigo-600 bg-indigo-50 border border-indigo-100 rounded px-1.5 py-0.5 align-middle" data-app-id="${app.id}" title=""></span>
+                            </div>
                             <div class="text-xs text-slate-400">${app.candidate_email}</div>
                         </td>
                         <td class="py-4">
@@ -271,10 +344,36 @@
                     </tr>
                 `;
                 }).join('');
+
+                // Phase 3 — fill in cross-job match badges in the background.
+                // Done async so the table renders immediately and badges
+                // appear when their data lands.
+                populateMatchBadges(apps);
             } catch (e) {
                 console.error(e);
             }
         };
+
+        // Phase 3 — fetch cross-job matches for each visible application
+        // and update the badge if there are any. Failures per row are
+        // silent; absence of badge just means no matches.
+        async function populateMatchBadges(apps) {
+            for (const app of apps) {
+                if (app.status !== 'processed') continue;
+                try {
+                    const matches = await Api.getMatches(app.id);
+                    if (matches.length === 0) continue;
+                    const badge = document.querySelector(`.match-badge[data-app-id="${app.id}"]`);
+                    if (!badge) continue;
+                    const titles = matches.map(m => `${m.job_title} (${Math.round(m.similarity * 100)}%)`).join(' · ');
+                    badge.textContent = `+${matches.length} other match${matches.length === 1 ? '' : 'es'}`;
+                    badge.title = titles;
+                    badge.classList.remove('hidden');
+                } catch (_) {
+                    // Silent failure — badge stays hidden
+                }
+            }
+        }
 
         // 3a. Retry a failed application's pending tasks
         window.retryApp = async (appId) => {
@@ -291,18 +390,206 @@
         window.viewAts = (appId) => {
             // Retrieve object from memory, NOT from HTML
             const app = applicationMap[appId];
-            
+
             if(!app) return;
 
             document.getElementById('atsName').innerText = app.candidate_name;
             document.getElementById('atsScore').innerText = `${app.ai_score}/100`;
-            
+
             // Handle newlines safely
             document.getElementById('atsContent').textContent = app.ai_critique || "Analysis pending...";
-            
+
             document.getElementById('downloadResume').href = app.resume_url;
+
+            // Phase 3 — load cross-job matches into the modal
+            document.getElementById('atsRematchBtn').dataset.appId = appId;
+            loadMatchesForModal(appId);
+
             document.getElementById('atsModal').classList.remove('hidden');
         };
+
+        // ---------------------------------------------------------------
+        // Phase 3 — Cross-job match handlers
+        // ---------------------------------------------------------------
+
+        async function loadMatchesForModal(appId) {
+            const listEl = document.getElementById('atsMatchesList');
+            listEl.innerHTML = '<div class="text-xs text-slate-400">Loading…</div>';
+            try {
+                const matches = await Api.getMatches(appId);
+                if (matches.length === 0) {
+                    listEl.innerHTML = '<div class="text-xs text-slate-400 italic">No other roles in your pool match this candidate above the 70% threshold.</div>';
+                    return;
+                }
+                listEl.innerHTML = matches.map(m => {
+                    const pct = Math.round(m.similarity * 100);
+                    let pctClass = "bg-amber-100 text-amber-700";
+                    if (pct >= 80) pctClass = "bg-emerald-100 text-emerald-700";
+                    return `
+                        <div class="flex justify-between items-center px-3 py-2 bg-slate-50 rounded border border-slate-100">
+                            <span class="text-slate-700">${escapeHtml(m.job_title)}</span>
+                            <span class="text-xs font-bold px-2 py-0.5 rounded ${pctClass}">${pct}% match</span>
+                        </div>`;
+                }).join('');
+            } catch (e) {
+                listEl.innerHTML = '<div class="text-xs text-red-500">Could not load matches.</div>';
+            }
+        }
+
+        document.getElementById('atsRematchBtn').addEventListener('click', async () => {
+            const btn = document.getElementById('atsRematchBtn');
+            const appId = btn.dataset.appId;
+            if (!appId) return;
+            btn.textContent = 'Re-checking…';
+            btn.disabled = true;
+            try {
+                await Api.refreshMatches(appId);
+                // Wait briefly for the worker to finish, then reload
+                setTimeout(() => loadMatchesForModal(appId), 1500);
+            } catch (_) {
+                // error modal already shown
+            } finally {
+                btn.textContent = '↻ Re-check matches';
+                btn.disabled = false;
+            }
+        });
+
+        document.getElementById('rematchAllBtn').addEventListener('click', () => {
+            showConfirmModal({
+                title: 'Re-check matches for all applicants',
+                details: [{ label: 'Effect', value: 'Queues one match task per applicant in your pool' }],
+                confirmText: 'Run bulk re-check',
+                note: 'This is rate-limited to 2 runs per hour. Results take up to a few minutes depending on pool size.',
+                onConfirm: async () => {
+                    try {
+                        const result = await Api.refreshAllMatches();
+                        showModal(`Queued ${result.tasks_queued} re-check task${result.tasks_queued === 1 ? '' : 's'}. Matches will update within a few minutes.`, 'success');
+                    } catch (_) {
+                        // error modal shown by Api.request
+                    }
+                },
+            });
+        });
+
+        // ---------------------------------------------------------------
+        // Phase 2 — Semantic search across the recruiter's applicant pool
+        // ---------------------------------------------------------------
+
+        // Holds search state for pagination + "Show more"
+        let searchState = { query: '', offset: 0, limit: 10, accumulated: [] };
+
+        document.getElementById('searchForm').addEventListener('submit', (e) => {
+            e.preventDefault();
+            const query = document.getElementById('searchInput').value.trim();
+            if (query.length < 3) {
+                showModal('Please enter at least 3 characters.');
+                return;
+            }
+            startNewSearch(query);
+        });
+
+        document.getElementById('searchInput').addEventListener('input', (e) => {
+            // Show the X button only when there's something to clear
+            document.getElementById('searchClearBtn').classList.toggle('hidden', e.target.value.length === 0);
+        });
+
+        document.getElementById('searchClearBtn').addEventListener('click', () => {
+            document.getElementById('searchInput').value = '';
+            document.getElementById('searchClearBtn').classList.add('hidden');
+            exitSearchMode();
+        });
+
+        document.getElementById('searchShowMoreBtn').addEventListener('click', () => {
+            performSearch(false);
+        });
+
+        function startNewSearch(query) {
+            searchState = { query, offset: 0, limit: 10, accumulated: [] };
+            enterSearchMode(query);
+            performSearch(true);
+        }
+
+        function enterSearchMode(query) {
+            document.getElementById('emptyState').classList.add('hidden');
+            document.getElementById('applicantView').classList.add('hidden');
+            document.getElementById('searchView').classList.remove('hidden');
+            document.getElementById('searchQueryEcho').textContent = `"${query}"`;
+            document.getElementById('searchResultsList').innerHTML = '';
+            document.getElementById('searchResultsEmpty').classList.add('hidden');
+            document.getElementById('searchShowMoreWrap').classList.add('hidden');
+        }
+
+        window.exitSearchMode = () => {
+            document.getElementById('searchView').classList.add('hidden');
+            if (activeJobId) {
+                document.getElementById('applicantView').classList.remove('hidden');
+            } else {
+                document.getElementById('emptyState').classList.remove('hidden');
+            }
+        };
+
+        async function performSearch(isInitial) {
+            const loadingEl  = document.getElementById('searchResultsLoading');
+            const emptyEl    = document.getElementById('searchResultsEmpty');
+            const showMoreEl = document.getElementById('searchShowMoreWrap');
+            const showMoreBtn= document.getElementById('searchShowMoreBtn');
+
+            loadingEl.classList.remove('hidden');
+            emptyEl.classList.add('hidden');
+            showMoreEl.classList.add('hidden');
+
+            try {
+                const data = await Api.searchCandidates(searchState.query, searchState.offset, searchState.limit);
+                loadingEl.classList.add('hidden');
+
+                if (isInitial && data.results.length === 0) {
+                    emptyEl.classList.remove('hidden');
+                    return;
+                }
+
+                searchState.accumulated = searchState.accumulated.concat(data.results);
+                renderSearchResults(searchState.accumulated);
+
+                if (data.has_more) {
+                    searchState.offset += searchState.limit;
+                    showMoreEl.classList.remove('hidden');
+                    showMoreBtn.textContent = `Show more (${searchState.accumulated.length} loaded)`;
+                }
+            } catch (e) {
+                loadingEl.classList.add('hidden');
+                // error modal already shown by Api.request
+            }
+        }
+
+        function renderSearchResults(results) {
+            const html = results.map(r => {
+                const similarityPct = Math.round(r.similarity * 100);
+                let pctClass = "bg-amber-100 text-amber-700";
+                if (similarityPct >= 80) pctClass = "bg-emerald-100 text-emerald-700";
+                else if (similarityPct < 65) pctClass = "bg-slate-100 text-slate-600";
+
+                // Save into applicationMap so clicking opens the modal correctly
+                applicationMap[r.application_id] = {
+                    id: r.application_id,
+                    candidate_name: r.candidate_name,
+                    candidate_email: r.candidate_email,
+                    resume_url: r.resume_url,
+                    ai_score: 0,
+                    ai_critique: 'Open from job applicants list for full critique.',
+                };
+
+                return `
+                <div onclick="viewAts(${r.application_id})" class="border border-slate-200 rounded-lg p-4 hover:border-indigo-400 hover:bg-slate-50 cursor-pointer transition">
+                    <div class="flex justify-between items-start mb-1">
+                        <div class="font-bold text-slate-800">${escapeHtml(r.candidate_name)}</div>
+                        <span class="text-xs font-bold px-2 py-0.5 rounded ${pctClass}">${similarityPct}% match</span>
+                    </div>
+                    <div class="text-xs text-slate-400 mb-2">${escapeHtml(r.candidate_email)} · Applied to <span class="font-medium text-slate-500">${escapeHtml(r.job_title)}</span></div>
+                    <div class="text-sm text-slate-600 italic border-l-2 border-slate-200 pl-3 line-clamp-2">"${escapeHtml(r.best_match_chunk)}"</div>
+                </div>`;
+            }).join('');
+            document.getElementById('searchResultsList').innerHTML = html;
+        }
 
         // AI Status Check
         document.getElementById('aiStatusBtn').addEventListener('click', async () => {

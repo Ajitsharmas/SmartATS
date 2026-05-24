@@ -83,9 +83,9 @@ A polymorphic `embeddings(entity_type, entity_id, ...)` table would mix concerns
 
 Initial design assumed jobs would fit in a single embedding. Reconsidered:
 
-- Senior-role JDs can easily exceed 2000+ words
+- Senior-role job descriptions can easily exceed 2000+ words
 - Embedding models have an input token limit (Gemini's is ~2048 tokens, ~8000 chars)
-- Long JDs would either truncate (losing detail) or fail
+- Long job descriptions would either truncate (losing detail) or fail outright
 - Chunking gives finer-grained matching for Feature 3 (e.g., "this candidate's Kubernetes experience matches the DevOps requirements of Job X")
 
 So `job_embedding` has multiple rows per job, just like `resume_embedding`.
@@ -109,8 +109,7 @@ Considered migrating to raw SQLAlchemy for cleaner pgvector integration. Decisio
 - HNSW index creation via raw SQL in `database.py` startup
 - Any future complex query that SQLModel's `select()` can't handle
 
-This is the standard escape pattern for SQLModel and is entirely defensible in interviews:
-> *"I used SQLModel because it gives me Pydantic validation and SQLAlchemy ORM in one class. Under the hood it's SQLAlchemy 2.0, so I dropped down to raw SQLAlchemy for things SQLModel couldn't express — the pgvector column type and HNSW index creation."*
+This is the standard escape pattern for SQLModel: keep the ORM-and-validation-in-one-class ergonomics for the common case, and drop into raw SQLAlchemy / SQL for the things SQLModel cannot express — in our case, the pgvector column type and the HNSW index creation. SQLModel is built directly on SQLAlchemy 2.0, so the escape hatch is always available without leaving the codebase.
 
 ---
 

@@ -16,15 +16,38 @@
 # distinguish them from generic exceptions (e.g., for retry decisions in
 # Celery tasks).
 
+import hashlib
+import json
 from functools import lru_cache
 
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from redis import Redis
+from redis.exceptions import RedisError
 
 from app.config import settings
 
 
 class EmbeddingError(Exception):
     """Raised when the embedding provider returns an error or is unreachable."""
+
+
+# Search-query embeddings are cached for an hour to absorb repeated queries
+# without incurring Gemini API calls. Resume / document chunks are NOT cached
+# here — they live in pgvector as persistent storage.
+QUERY_EMBEDDING_CACHE_TTL_SECONDS = 3600
+
+_redis_client: Redis | None = None
+
+
+def _get_redis_client() -> Redis:
+    """Lazily construct a Redis client for the query-embedding cache."""
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = Redis.from_url(
+            settings.RATE_LIMITER_STORAGE_URL,
+            decode_responses=True,
+        )
+    return _redis_client
 
 
 @lru_cache(maxsize=1)
@@ -69,3 +92,41 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
         return _get_client().embed_documents(texts)
     except Exception as e:
         raise EmbeddingError(f"Failed to embed texts: {e}") from e
+
+
+def embed_query_cached(query: str) -> list[float]:
+    """
+    Embed a search query, using Redis to cache the result for an hour.
+
+    Common queries (e.g. "Python engineer", "AWS architect") hit the cache
+    and skip the Gemini API call entirely — typical search workloads have
+    high repetition, so a substantial fraction of searches end up free.
+
+    If Redis is unreachable for any reason, the function silently falls
+    back to a direct Gemini call — caching is an optimisation, not a hard
+    dependency for search to work.
+    """
+    cache_key = f"emb:{hashlib.sha256(query.encode('utf-8')).hexdigest()}"
+
+    try:
+        client = _get_redis_client()
+        cached = client.get(cache_key)
+        if cached:
+            return json.loads(cached)
+    except (RedisError, json.JSONDecodeError):
+        # Cache miss / Redis down / bad cached value — fall through to direct call
+        pass
+
+    vector = embed_text(query)
+
+    try:
+        _get_redis_client().setex(
+            cache_key,
+            QUERY_EMBEDDING_CACHE_TTL_SECONDS,
+            json.dumps(vector),
+        )
+    except RedisError:
+        # Failed to write to cache — not a problem, we still have the vector
+        pass
+
+    return vector

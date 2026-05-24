@@ -44,6 +44,11 @@ class JobListing(SQLModel, table=True):
 
     created_at: datetime = Field(default_factory=datetime.now)
 
+    # Set by embed_job_task.on_failure when the job-description embedding
+    # pipeline exhausts its retries. Non-null = the job currently has no
+    # usable embedding for cross-job matching.
+    embedding_error: str | None = None
+
     # 3. THE CUSTOM LOGIC
     # Pydantic Validator to enforce business rules that types can't catch.
     @field_validator("salary_range", mode="after")
@@ -168,9 +173,11 @@ class Application(SQLModel, table=True):
     status: str = "pending"  # pending -> processed | pending -> failed -> pending (after retry)
 
     # Failure tracking (populated by Celery task on_failure hooks when retries exhaust).
-    # When either is non-null, status becomes "failed" and the dashboard offers a Retry button.
+    # When any of these is non-null, status becomes "failed" and the dashboard
+    # offers a Retry button that re-dispatches whichever task(s) failed.
     scoring_error: Optional[str] = None
     embedding_error: Optional[str] = None
+    matching_error: Optional[str] = None
 
     created_at: datetime = Field(default_factory=datetime.now)
 
@@ -228,6 +235,37 @@ class ResumeEmbedding(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.now)
 
 
+# --- SEMANTIC SEARCH SCHEMAS (Phase 2) ---
+#
+# Request/response models for POST /search/candidates. These are pure Pydantic
+# schemas (no DB tables) for shaping the API surface.
+
+
+class SearchQuery(SQLModel):
+    """Request body for POST /search/candidates."""
+    query: str = Field(min_length=3, max_length=500)
+    limit: int = Field(default=10, ge=1, le=50)
+    offset: int = Field(default=0, ge=0)
+
+
+class SearchResult(SQLModel):
+    """A single search hit — one candidate, with their best-matching resume chunk."""
+    application_id: int
+    candidate_name: str
+    candidate_email: str
+    resume_url: str
+    job_title: str            # parent job they originally applied to
+    best_match_chunk: str     # the resume passage that matched the query
+    similarity: float         # 0.0–1.0 cosine similarity, higher is better
+
+
+class SearchResponse(SQLModel):
+    """Wraps the result list with pagination hints for the frontend."""
+    results: list[SearchResult]
+    total_returned: int       # length of results — convenience for the frontend
+    has_more: bool            # true if a full page was returned (more likely available)
+
+
 class JobEmbedding(SQLModel, table=True):
     """
     A single embedded chunk of a job description.
@@ -250,3 +288,44 @@ class JobEmbedding(SQLModel, table=True):
     )
 
     created_at: datetime = Field(default_factory=datetime.now)
+
+
+# --- CROSS-JOB MATCHING (Phase 3) ---
+#
+# Stores computed alternative-job suggestions for each application.
+# Populated by `match_jobs_task` after resume embedding completes, and on
+# manual recheck via the dashboard.
+
+
+class CrossJobMatch(SQLModel, table=True):
+    """
+    A single computed match between an application and an alternative job
+    posting within the same recruiter's pool.
+
+    The `similarity` value is the aggregate top-3-chunk average score described
+    in docs/ai-features/phase-3-cross-job-matching.md.
+    """
+
+    __table_args__ = (
+        UniqueConstraint("application_id", "matched_job_id", name="uq_cross_job_match"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    application_id: int = Field(
+        sa_column=Column(Integer, ForeignKey("application.id", ondelete="CASCADE"), nullable=False, index=True)
+    )
+
+    matched_job_id: int = Field(
+        sa_column=Column(Integer, ForeignKey("joblisting.id", ondelete="CASCADE"), nullable=False, index=True)
+    )
+
+    similarity: float
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class CrossJobMatchResult(SQLModel):
+    """Response shape for GET /applications/{id}/matches — one suggested alternative job."""
+    matched_job_id: int
+    job_title: str
+    similarity: float

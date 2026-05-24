@@ -107,7 +107,7 @@ If you want containers to scale up and down automatically in response to queue d
 | Tool | Complexity | Notes |
 |---|---|---|
 | **Docker Swarm** | Medium | Built into Docker, no extra infrastructure needed. Supports replica scaling but not event-driven queue-based scaling |
-| **Kubernetes** | High | Industry standard for container orchestration. Overkill for a single-VM demo app |
+| **Kubernetes** | High | Industry standard for container orchestration. Overkill for single-VM deployments; appropriate when running across multiple nodes |
 | **KEDA** (Kubernetes Event-driven Autoscaling) | High | Can scale Celery workers specifically based on Redis queue depth — the most targeted solution for this use case, but requires Kubernetes |
 
 For this app on a single GCP e2-micro, **manual scaling with `--scale` is the right approach**. Auto-scaling tools add significant infrastructure complexity and only make sense when:

@@ -65,10 +65,13 @@ services:
     env_file:
       - .env
     restart: always
-    # DEMO ONLY: exposes Postgres on the host so DBeaver can connect at localhost:5432.
-    # In a real production environment, remove this ports block entirely —
+    # NON-PRODUCTION DEFAULT: exposes Postgres on the host so DBeaver / psql can
+    # connect at localhost:5432 for development and operational convenience.
+    # In a hardened production deployment, remove this ports block entirely —
     # the database should only be reachable by other containers on the internal
-    # Docker network, never directly from the outside world.
+    # Docker network, never directly from the outside world. The GCP firewall
+    # rules in docs/deployment-gcp.md restrict this port to the operator's IP
+    # to mitigate the exposure while it is enabled.
     ports:
       - "5432:5432"
 
@@ -81,12 +84,13 @@ services:
   minio:
     image: minio/minio
     command: server /data --console-address ":9001"
-    # DEMO ONLY: exposes MinIO API (9000) and web console (9001) on the host.
-    # The console lets you browse uploaded resumes visually for demo purposes.
-    # In a real production environment, remove this ports block entirely —
+    # NON-PRODUCTION DEFAULT: exposes MinIO API (9000) and web console (9001)
+    # on the host for development and operational convenience — the console
+    # lets you browse uploaded resumes visually.
+    # In a hardened production deployment, remove this ports block entirely —
     # MinIO should only be reachable by other containers on the internal
-    # Docker network. On GCP, restrict both ports to your IP only via a
-    # firewall rule — never open them to 0.0.0.0/0.
+    # Docker network. On GCP, the firewall rules in docs/deployment-gcp.md
+    # restrict both ports to the operator's IP — never open them to 0.0.0.0/0.
     ports:
       - "9000:9000"
       - "9001:9001"

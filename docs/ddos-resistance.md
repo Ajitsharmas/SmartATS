@@ -61,4 +61,4 @@ Nginx returns `429 Too Many Requests` (not its default `503`) so clients receive
 - **Botnet / distributed attacks** — per-IP limits are ineffective when an attacker controls thousands of IPs. Cloudflare or a WAF at the network edge is the correct solution.
 - **Single-instance Nginx memory** — Nginx rate limiting state is local to the Nginx process. In a multi-Nginx setup, a shared zone backend (e.g. `nginx-plus` or `lua-resty-limit-traffic` with Redis) would be needed.
 
-For a demo application these gaps are acceptable and expected. The implemented layers are sufficient to prevent accidental overload, casual abuse, and brute-force attempts.
+These gaps are acceptable for small-scale deployments where the Nginx + SlowAPI layers provide solid defence against accidental overload, casual abuse, and brute-force attempts. If the application grows to a scale that attracts distributed attacks, putting it behind Cloudflare (or another edge WAF) is the correct next step — that mitigation is purely additive and does not require any change to the existing layers.

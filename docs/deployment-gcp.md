@@ -12,7 +12,7 @@ Everything used is **free**:
 | Let's Encrypt SSL certificate | Free (auto-renews every 90 days) |
 | Domain (`smartats.xyz`) | Already owned |
 
-The only billable item is outbound network traffic above 1 GB/month — irrelevant for a demo app.
+The only billable item is outbound network traffic above 1 GB/month — well within free-tier limits at small scale.
 
 > **Region requirement:** The e2-micro free tier only applies in `us-central1`, `us-west1`, or `us-east1`. Any other region incurs charges.
 
@@ -45,7 +45,7 @@ GCP Console → **VPC Network → IP Addresses → Reserve External Static Addre
 | Field | Value |
 |---|---|
 | Name | `smartats-ip` (or any name) |
-| Network Service Tier | Standard (sufficient for a demo) |
+| Network Service Tier | Standard (sufficient for small-scale deployments) |
 | IP version | IPv4 |
 | Type | Regional |
 | Region | Same region as your VM (e.g. `us-central1`) |
@@ -232,9 +232,9 @@ curl ifconfig.me
 
 ---
 
-### Option A — Restrict only the database and MinIO ports (recommended for demos)
+### Option A — Restrict only the database and MinIO ports (default recommendation)
 
-This keeps the app publicly accessible at `smartats.xyz` so interviewers can reach it, but prevents anyone from connecting directly to Postgres or MinIO from outside.
+This keeps the application itself publicly accessible at `smartats.xyz` while preventing anyone from connecting directly to Postgres or MinIO from outside.
 
 Create **two** firewall rules — one for Postgres and one for MinIO:
 
@@ -387,5 +387,5 @@ To lock it down again, change both back to `YOUR_IP/32`.
 
 | Approach | App accessible to public | DB + MinIO accessible to public | Best for |
 |---|---|---|---|
-| Option A (DB + MinIO only) | Yes | No — your IP only | Demo purposes |
+| Option A (DB + MinIO only) | Yes | No — your IP only | Default — public app with private data access |
 | Option B (full restrict) | No — your IP only | No — your IP only | Private development / testing |

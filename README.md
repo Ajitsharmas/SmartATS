@@ -69,3 +69,5 @@ An AI-powered Applicant Tracking System built with FastAPI, Celery, and Google G
 | [AI Features Roadmap](docs/ai-features/roadmap.md) | Planned RAG / semantic search / agent features, shared pgvector infrastructure, implementation phases, free-tier compatibility |
 | [AI Phase 0 — Foundation](docs/ai-features/phase-0-foundation.md) | pgvector setup, embedding tables, ORM choice (SQLModel + drop-down to SQLAlchemy), Gemini embeddings client, smoke test |
 | [AI Phase 1 — Embedding Pipeline + Task Recovery](docs/ai-features/phase-1-embedding-pipeline.md) | Resume chunking, embedding Celery task, parallel dispatch, manual retry mechanism for failed tasks (retrofitted to all existing tasks) |
+| [AI Phase 2 — Semantic Search](docs/ai-features/phase-2-semantic-search.md) | Semantic search across the recruiter's applicant pool, owner-scoped multi-tenancy, pagination, Redis query embedding cache |
+| [AI Phase 3 — Cross-Job Matching](docs/ai-features/phase-3-cross-job-matching.md) | Job description embedding, cross-job match SQL, per-candidate and bulk recheck endpoints, dashboard match badges |

@@ -17,27 +17,44 @@ from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from sqlalchemy import text
 from sqlmodel import Session, select
 
 from app.ai import AIProvider, GeminiUnavailableError, get_ai_provider
 from app.auth import auth_router, get_current_user
 from app.config import settings
+from app.embeddings import EmbeddingError, embed_query_cached
 from app.limiter import get_user_key, limiter
 
 # Import our local modules
 from app.database import create_db_and_tables, get_session
 
 # CRITICAL: We import ApplicationSubmit here to handle the full frontend payload
-from app.models import AnalysisRequest, Application, ApplicationSubmit, JobListing, JobListingUpdate, User
+from app.models import (
+    AnalysisRequest,
+    Application,
+    ApplicationSubmit,
+    CrossJobMatch,
+    CrossJobMatchResult,
+    JobListing,
+    JobListingUpdate,
+    SearchQuery,
+    SearchResponse,
+    SearchResult,
+    User,
+)
 from app.utils import get_s3_client, init_storage
 from sqlalchemy.exc import IntegrityError
 
 from app.worker import (
     analyze_resume_task,
     celery_app,
+    embed_job_task,
     embed_resume_task,
+    match_jobs_task,
     rescore_application_task,
 )
+from celery import chain
 
 
 # 1. LIFESPAN CONTEXT MANAGER
@@ -212,6 +229,11 @@ def create_job(
     session.add(job)
     session.commit()
     session.refresh(job)
+
+    # Dispatch job embedding for cross-job matching (Phase 3).
+    # Embedding runs asynchronously and is independent of job creation success.
+    embed_job_task.delay(job_id=job.id)
+
     return job
 
 
@@ -316,10 +338,13 @@ def update_job(
     session.commit()
     session.refresh(job)
 
-    # Re-score only when fields that affect candidate fit actually change.
-    # Salary is a business constraint invisible to the AI — no re-score needed.
-    RESCORE_FIELDS = {"title", "description", "skills", "location"}
-    if changed_fields & RESCORE_FIELDS:
+    # Re-score and re-embed only when fields that affect candidate fit actually
+    # change. Salary is a business constraint invisible to the AI — no rescore
+    # or re-embedding needed. This same set is used for both rescoring existing
+    # applications AND for re-embedding the job description for cross-job
+    # matching (Phase 3) — they share the same trigger semantics.
+    SCORING_RELEVANT_FIELDS = {"title", "description", "skills", "location"}
+    if changed_fields & SCORING_RELEVANT_FIELDS:
         applications = session.exec(select(Application).where(Application.job_id == job_id)).all()
         for app_record in applications:
             app_record.status = "pending"
@@ -329,6 +354,12 @@ def update_job(
         session.commit()
         for app_record in applications:
             rescore_application_task.delay(app_record.id)
+
+        # Re-embed the job description so cross-job matching reflects the edit.
+        # Existing CrossJobMatch rows pointing to this job remain valid until
+        # the next match_jobs_task run for each candidate; recruiters can
+        # trigger a bulk recheck if they want immediate freshness.
+        embed_job_task.delay(job_id=job.id)
 
     return job
 
@@ -519,6 +550,113 @@ def get_applications(
     return results
 
 
+# ---------------------------------------------------------------------------
+# Semantic search SQL (Phase 2)
+# ---------------------------------------------------------------------------
+# CTE ranks every resume chunk by similarity to the query within each
+# candidate, restricted to jobs owned by the current recruiter. The outer
+# query keeps only the best chunk per candidate (rank = 1), applies the
+# similarity threshold, and paginates.
+#
+# Full walkthrough of every clause in docs/ai-features/phase-2-semantic-search.md
+SEARCH_SQL = """
+WITH ranked_chunks AS (
+    SELECT
+        re.application_id,
+        re.chunk_text,
+        1 - (re.embedding <=> CAST(:query_vector AS vector)) AS similarity,
+        ROW_NUMBER() OVER (
+            PARTITION BY re.application_id
+            ORDER BY re.embedding <=> CAST(:query_vector AS vector)
+        ) AS rank_within_candidate
+    FROM resumeembedding re
+    JOIN application a ON a.id = re.application_id
+    JOIN joblisting j ON j.id = a.job_id
+    WHERE j.owner_id = :owner_id
+)
+SELECT
+    a.id AS application_id,
+    a.candidate_name,
+    a.candidate_email,
+    a.resume_url,
+    j.title AS job_title,
+    rc.chunk_text AS best_match_chunk,
+    rc.similarity
+FROM ranked_chunks rc
+JOIN application a ON a.id = rc.application_id
+JOIN joblisting j ON j.id = a.job_id
+WHERE rc.rank_within_candidate = 1
+  AND rc.similarity >= :min_similarity
+ORDER BY rc.similarity DESC
+LIMIT :limit OFFSET :offset
+"""
+
+SEARCH_MIN_SIMILARITY = 0.6
+
+
+@app.post("/search/candidates", response_model=SearchResponse, tags=["AI"])
+@limiter.limit("10/minute", key_func=get_user_key)
+def search_candidates(
+    request: Request,
+    payload: SearchQuery,
+    session: SessionDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    """
+    Semantic search across the authenticated recruiter's applicant pool. Protected.
+
+    Embeds the query text, then runs a vector-similarity search over
+    `resume_embedding`, restricted to applications for jobs owned by the
+    current recruiter. Returns one row per candidate with the resume chunk
+    that matched best, ranked by cosine similarity (≥ 0.6), paginated.
+
+    Query embeddings are cached in Redis for one hour to absorb repeated
+    searches without hitting Gemini.
+
+    **Errors:**
+    - `401` – missing or invalid token
+    - `429` – rate limit hit (10 searches/minute per user)
+    - `503` – embedding provider unavailable (transient — retry shortly)
+    """
+    try:
+        query_vector = embed_query_cached(payload.query)
+    except EmbeddingError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Search temporarily unavailable: {e}",
+        )
+
+    rows = session.execute(
+        text(SEARCH_SQL),
+        {
+            "query_vector": str(query_vector),
+            "owner_id": current_user.id,
+            "min_similarity": SEARCH_MIN_SIMILARITY,
+            "limit": payload.limit,
+            "offset": payload.offset,
+        },
+    ).fetchall()
+
+    results = [
+        SearchResult(
+            application_id=row.application_id,
+            candidate_name=row.candidate_name,
+            candidate_email=row.candidate_email,
+            resume_url=row.resume_url,
+            job_title=row.job_title,
+            best_match_chunk=row.best_match_chunk,
+            similarity=float(row.similarity),
+        )
+        for row in rows
+    ]
+
+    return SearchResponse(
+        results=results,
+        total_returned=len(results),
+        has_more=len(results) == payload.limit,
+    )
+
+
 @app.post("/applications/{application_id}/retry", tags=["Applications"])
 def retry_application(
     application_id: int,
@@ -528,16 +666,17 @@ def retry_application(
     """
     Re-dispatch failed Celery tasks for an application. Protected.
 
-    When a task (scoring or embedding) exhausts its Celery retries, the
-    `on_failure` hook records the error in `scoring_error` or
-    `embedding_error` and sets the application status to `"failed"`. This
-    endpoint lets the recruiter re-trigger the failed task(s) from the
-    dashboard:
+    When a task (scoring, embedding, or matching) exhausts its Celery retries,
+    the corresponding `on_failure` hook records the error in `scoring_error`,
+    `embedding_error`, or `matching_error` and sets the application status to
+    `"failed"`. This endpoint lets the recruiter re-trigger the failed task(s)
+    from the dashboard:
 
-    1. Looks at `scoring_error` and `embedding_error` to determine what failed
-    2. Fetches the stored PDF from MinIO and re-extracts text (since we don't
-       persist the extracted text)
-    3. Re-dispatches `analyze_resume_task` and/or `embed_resume_task` as needed
+    1. Looks at the three error columns to determine what failed
+    2. Fetches the stored PDF from MinIO and re-extracts text if a scoring or
+       embedding retry is needed (we don't persist the extracted text)
+    3. Re-dispatches `analyze_resume_task`, `embed_resume_task`, and/or
+       `match_jobs_task` as needed
     4. Clears the corresponding error columns and resets status to `"pending"`
 
     **Errors:**
@@ -557,34 +696,169 @@ def retry_application(
     if job.owner_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized.")
 
-    if not app_record.scoring_error and not app_record.embedding_error:
+    if not (app_record.scoring_error or app_record.embedding_error or app_record.matching_error):
         raise HTTPException(status_code=400, detail="Nothing to retry — no failed tasks.")
 
-    # Re-extract resume text from MinIO. We don't persist the extracted text;
-    # the canonical source is the PDF, so we fetch and re-extract.
-    s3_key = app_record.resume_url.split("/download/")[-1]
-    try:
-        s3 = get_s3_client()
-        obj = s3.get_object(Bucket=settings.MINIO_BUCKET_NAME, Key=s3_key)
-        pdf_bytes = obj["Body"].read()
-        pdf_reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
-        text_content = "".join(page.extract_text() or "" for page in pdf_reader.pages)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not re-read resume from storage: {e}")
+    # If scoring or embedding failed, we need the resume text. Re-extract from
+    # MinIO since we don't persist the extracted text. Matching does not need
+    # the text (works off the stored embeddings).
+    text_content = None
+    if app_record.scoring_error or app_record.embedding_error:
+        s3_key = app_record.resume_url.split("/download/")[-1]
+        try:
+            s3 = get_s3_client()
+            obj = s3.get_object(Bucket=settings.MINIO_BUCKET_NAME, Key=s3_key)
+            pdf_bytes = obj["Body"].read()
+            pdf_reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+            text_content = "".join(page.extract_text() or "" for page in pdf_reader.pages)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Could not re-read resume from storage: {e}")
 
     if app_record.scoring_error:
         analyze_resume_task.delay(text_content=text_content, application_id=application_id)
         app_record.scoring_error = None
 
     if app_record.embedding_error:
-        embed_resume_task.delay(text_content=text_content, application_id=application_id)
+        # Re-chain matching after embedding so the dependency is preserved on retry
+        chain(
+            embed_resume_task.s(text_content=text_content, application_id=application_id),
+            match_jobs_task.si(application_id=application_id),
+        ).apply_async()
         app_record.embedding_error = None
+        # Embedding retry also resolves the matching error since they're chained
+        app_record.matching_error = None
+    elif app_record.matching_error:
+        # Matching alone failed — re-dispatch just the matching task
+        match_jobs_task.delay(application_id=application_id)
+        app_record.matching_error = None
 
     app_record.status = "pending"
     session.add(app_record)
     session.commit()
 
     return {"message": "Retry dispatched", "application_id": application_id}
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Cross-job match endpoints
+# ---------------------------------------------------------------------------
+
+@app.get(
+    "/applications/{application_id}/matches",
+    response_model=List[CrossJobMatchResult],
+    tags=["AI"],
+)
+@limiter.limit("60/minute", key_func=get_user_key)
+def get_application_matches(
+    request: Request,
+    application_id: int,
+    session: SessionDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    """
+    List cross-job match suggestions for a single application. Protected.
+
+    Returns the alternative jobs (within the same recruiter's pool) that the
+    candidate's resume also matches well, as computed by `match_jobs_task`.
+    Read-only DB query — no Gemini call.
+
+    **Errors:**
+    - `401` – missing or invalid token
+    - `403` – the parent job belongs to a different recruiter
+    - `404` – application not found
+    """
+    app_record = session.get(Application, application_id)
+    if not app_record:
+        raise HTTPException(status_code=404, detail="Application not found.")
+
+    parent_job = session.get(JobListing, app_record.job_id)
+    if not parent_job or parent_job.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized.")
+
+    statement = (
+        select(CrossJobMatch, JobListing)
+        .join(JobListing, JobListing.id == CrossJobMatch.matched_job_id)
+        .where(CrossJobMatch.application_id == application_id)
+        .order_by(CrossJobMatch.similarity.desc())
+    )
+    rows = session.exec(statement).all()
+
+    return [
+        CrossJobMatchResult(
+            matched_job_id=match.matched_job_id,
+            job_title=job.title,
+            similarity=match.similarity,
+        )
+        for match, job in rows
+    ]
+
+
+@app.post("/applications/{application_id}/match-refresh", tags=["AI"])
+@limiter.limit("10/minute", key_func=get_user_key)
+def refresh_application_matches(
+    request: Request,
+    application_id: int,
+    session: SessionDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    """
+    Re-compute cross-job matches for a single application. Protected.
+
+    Dispatches `match_jobs_task` for this application. The task is idempotent:
+    it deletes existing match rows and inserts fresh ones. Useful after the
+    recruiter has posted new jobs and wants to see if existing candidates now
+    match the new roles.
+
+    **Errors:**
+    - `401` – missing or invalid token
+    - `403` – the parent job belongs to a different recruiter
+    - `404` – application not found
+    """
+    app_record = session.get(Application, application_id)
+    if not app_record:
+        raise HTTPException(status_code=404, detail="Application not found.")
+
+    parent_job = session.get(JobListing, app_record.job_id)
+    if not parent_job or parent_job.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized.")
+
+    match_jobs_task.delay(application_id=application_id)
+    return {"message": "Match refresh dispatched", "application_id": application_id}
+
+
+@app.post("/matches/refresh-all", tags=["AI"])
+@limiter.limit("2/hour", key_func=get_user_key)
+def refresh_all_matches(
+    request: Request,
+    session: SessionDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    """
+    Bulk-recompute cross-job matches for every application in the recruiter's
+    pool. Protected. Heavy operation — strictly rate-limited (2/hour per user).
+
+    Iterates over every application that belongs to a job owned by the current
+    recruiter and dispatches `match_jobs_task` for each. Returns the number of
+    tasks queued so the dashboard can show progress feedback.
+
+    **Errors:**
+    - `401` – missing or invalid token
+    - `429` – rate limit hit (only 2 bulk refreshes per hour)
+    """
+    statement = (
+        select(Application.id)
+        .join(JobListing, JobListing.id == Application.job_id)
+        .where(JobListing.owner_id == current_user.id)
+    )
+    application_ids = [row for row in session.exec(statement).all()]
+
+    for app_id in application_ids:
+        match_jobs_task.delay(application_id=app_id)
+
+    return {
+        "message": "Bulk match refresh dispatched",
+        "tasks_queued": len(application_ids),
+    }
 
 
 # --- Processing ROUTES (The Main Workflow) ---
@@ -632,18 +906,23 @@ async def process_resume(request: Request, payload: ApplicationSubmit, session: 
             detail="You have already applied for this posting. Multiple applications are not allowed for the same job.",
         )
 
-    # B. Trigger Workers — scoring and embedding run in PARALLEL.
-    # The two tasks are independent: scoring uses Gemini text completion to
-    # produce a score+critique; embedding uses Gemini's embedding model to
-    # populate pgvector for semantic search / RAG (Phase 1+).
-    # Running them in parallel means the recruiter sees the final score
-    # sooner, and a failure in one doesn't block the other.
+    # B. Trigger Workers.
+    # Scoring and the embedding-then-match pipeline run in PARALLEL.
+    #
+    # Scoring: uses Gemini text completion to produce score+critique.
+    # Embedding → Matching: a Celery chain (Phase 3) — match_jobs_task needs
+    # resume_embedding rows to exist, so it runs strictly AFTER embed_resume_task
+    # succeeds. Using .si() (immutable signature) so the matching task does
+    # not receive the embedding task's return value as input.
     scoring_task = analyze_resume_task.delay(
         text_content=payload.request.text, application_id=app_record.id
     )
-    embed_resume_task.delay(
-        text_content=payload.request.text, application_id=app_record.id
-    )
+    chain(
+        embed_resume_task.s(
+            text_content=payload.request.text, application_id=app_record.id
+        ),
+        match_jobs_task.si(application_id=app_record.id),
+    ).apply_async()
 
     return {
         "message": "Application received",
