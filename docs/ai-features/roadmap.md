@@ -93,12 +93,13 @@ Building this foundation once enables all three features.
 
 | Phase | Deliverable | Effort | Status |
 |---|---|---|---|
-| 0 | Swap Postgres → pgvector image, add embedding tables, install Gemini embeddings client | 1–2 hours | Pending |
-| 1 | Resume chunking + embedding Celery task; embed on upload | 1 day | Pending |
-| 2 | **Feature 2 — Semantic Search** endpoint and dashboard search box | 1 day | Pending |
-| 3 | **Feature 3 — Cross-Job Match** — embed jobs, run match on application submit | Half day | Pending |
-| 4 | **Feature 1 — RAG Q&A** endpoint and chat UI on candidate detail page | 1–2 days | Pending |
-| 5 | **Feature 4 — Recruiter Assistant Agent** — LangChain/LangGraph agent with tool calling | 2–3 days | Deferred — start after Phase 4 |
+| 0 | Swap Postgres → pgvector image, add embedding tables, install Gemini embeddings client | 1–2 hours | Complete |
+| 1 | Resume chunking + embedding Celery task; embed on upload | 1 day | Complete |
+| 2 | **Feature 2 — Semantic Search** endpoint and dashboard search box | 1 day | Complete |
+| 3 | **Feature 3 — Cross-Job Match** — embed jobs, run match on application submit | Half day | Complete |
+| 4 | **Feature 1 — RAG Q&A** endpoint and chat UI on candidate detail page | 1–2 days | Complete |
+| 5 | **LLM Re-ranking** — two-stage retrieve-then-rerank quality improvement for Phase 2 + 3 | 1–2 days | Complete |
+| 6 | **Feature 4 — Recruiter Assistant Agent** — read-only chat assistant + job-authoring tools + candidate outreach (drafts only, recruiter-approved sends via Resend). Scope: Tiers 2 + 3 + 5 from the agentic-tiers analysis. | 1 week | Designed — see [phase-6-agent.md](phase-6-agent.md) |
 
 ---
 

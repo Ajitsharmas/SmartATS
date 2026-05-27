@@ -39,9 +39,13 @@ Search returns one row per **candidate**, not per chunk. Each result shows the c
 
 Recruiters think in terms of candidates, not text chunks. Showing the same person three times because three of their chunks matched is noise. The single best-matching chunk is more than enough as evidence of relevance. If the recruiter wants more depth on a specific candidate, the dashboard's existing analysis modal already shows the full critique.
 
-### 2. Similarity threshold — 0.6 minimum
+### 2. Similarity threshold — 0.7 minimum
 
-Results below 0.6 cosine similarity are filtered out before display. Below that, semantic similarity is mostly noise and surfacing the results would be misleading.
+Results below 0.7 cosine similarity are filtered out before display.
+
+**Why 0.7 and not the textbook 0.5 / 0.6 starting point:** resume chunks share a lot of boilerplate language — generic job titles, common skill mentions, standard education formats — which means many resumes cross 0.6 against many queries without being a real match. Testing with real resumes showed 0.6 produced too much noise to be useful as a screening signal. 0.7 cuts the noise floor significantly while still being lenient enough to surface non-obvious matches (a Django developer for a "Python web framework" query, for example).
+
+If 0.7 ever feels too lenient or too strict, the threshold lives as a single constant (`SEARCH_MIN_SIMILARITY` in `app/main.py`) and can be tuned without schema or query changes.
 
 If a query returns no rows after this filter, the dashboard shows a clear "no matches found" message rather than misleading low-relevance results.
 
@@ -122,7 +126,7 @@ Recruiter types query  →  POST /search/candidates
                               │
                               ├──→ Run pgvector similarity SQL (joins through
                               │    Application + JobListing, filtered to
-                              │    current_user.id, threshold 0.6, LIMIT/OFFSET)
+                              │    current_user.id, threshold 0.7, LIMIT/OFFSET)
                               │
                               └──→ Return list[SearchResult]
 ```
@@ -156,7 +160,7 @@ FROM ranked_chunks rc
 JOIN application a ON a.id = rc.application_id
 JOIN joblisting j ON j.id = a.job_id
 WHERE rc.rank_within_candidate = 1
-  AND rc.similarity >= 0.6
+  AND rc.similarity >= 0.7
 ORDER BY rc.similarity DESC
 LIMIT :limit OFFSET :offset;
 ```
@@ -228,7 +232,7 @@ FROM ranked_chunks rc
 JOIN application a ON a.id = rc.application_id
 JOIN joblisting j ON j.id = a.job_id
 WHERE rc.rank_within_candidate = 1
-  AND rc.similarity >= 0.6
+  AND rc.similarity >= 0.7
 ORDER BY rc.similarity DESC
 LIMIT :limit OFFSET :offset;
 ```
@@ -236,7 +240,7 @@ LIMIT :limit OFFSET :offset;
 This stage shapes the final response:
 
 - **`WHERE rc.rank_within_candidate = 1`** keeps only the best-matching chunk per candidate. This is what gives us "one row per candidate" (Option B from the decisions section).
-- **`AND rc.similarity >= 0.6`** drops any candidate whose best chunk didn't clear the similarity threshold. Without this filter the dashboard would show low-quality matches that aren't really relevant.
+- **`AND rc.similarity >= 0.7`** drops any candidate whose best chunk didn't clear the similarity threshold. Without this filter the dashboard would show low-quality matches that aren't really relevant.
 - **`JOIN application a`** and **`JOIN joblisting j`** bring back the human-readable fields (candidate name, email, job title, resume URL) that the CTE doesn't carry. We re-join here because the CTE only kept the columns needed for ranking, and re-joining is cheap because we already have the application IDs.
 - **`ORDER BY rc.similarity DESC`** sorts the surviving candidates from best to worst match.
 - **`LIMIT :limit OFFSET :offset`** applies pagination. With `limit=10 offset=0` you get the top 10; with `offset=10` you get the next 10, and so on.
@@ -268,7 +272,7 @@ At scale, the dominant cost is the HNSW computation itself, which is exactly wha
 - **Tenant isolation in SQL**, not in the route layer. Even if a future bug lets a request reach this query with the wrong `owner_id`, the database still cannot return another recruiter's data.
 - **One round-trip** — single query, no N+1 patterns.
 - **Pagination is free** — adding `OFFSET` does not require any rewriting of the surrounding logic; the same query handles "show the first page" and "show page 5".
-- **Threshold tuning is config-driven** — `0.6` is a parameter, not a magic number baked into the schema. Tune it without migrations.
+- **Threshold tuning is config-driven** — `0.7` is a parameter, not a magic number baked into the schema. Tune it without migrations.
 
 ---
 
@@ -336,7 +340,7 @@ Free-tier Gemini caps (15 RPM, 1500 requests/day) become the practical ceiling u
 | Slow query at scale | HNSW index on `embedding`; owner filter applied in the CTE before the row-number window |
 | Gemini embedding call fails | `EmbeddingError` caught in the endpoint, returns 503 with a clean message; dashboard shows it gracefully |
 | Empty applicant pool | Query returns no rows; frontend shows "no matches" message |
-| Junk query (`"asdf asdf"`) | Embedding still works, but no chunks clear the 0.6 threshold; "no matches" message |
+| Junk query (`"asdf asdf"`) | Embedding still works, but no chunks clear the 0.7 threshold; "no matches" message |
 | Rate limit exceeded | 429 returned by SlowAPI; dashboard shows the standard rate-limit message |
 | Deep pagination becomes slow | Acceptable at typical applicant-pool sizes; migration path to cursor-based pagination is documented |
 
@@ -349,7 +353,7 @@ After Phase 2 is in place, validate:
 1. Create test recruiter A, a test job owned by A, and a test application
 2. Populate the application's resume chunks via `embed_resume_task` with a resume text mentioning Python, AWS, etc.
 3. Call `/search/candidates` as recruiter A with a related query: *"Python developer with cloud experience"*
-4. Assert: the test candidate appears in the results with similarity ≥ 0.6
+4. Assert: the test candidate appears in the results with similarity ≥ 0.7
 5. Call the endpoint with an unrelated query: *"marine biology research"*
 6. Assert: empty results (threshold filters out junk)
 7. Create recruiter B, a job owned by B, and an application — populate embeddings
@@ -417,3 +421,5 @@ If the test ever fails on the multi-tenancy step, that is a security regression 
 ## Status
 
 Design approved. Implementation complete. Smoke test ready to run.
+
+The endpoint was extended in [Phase 5](phase-5-llm-reranking.md) with an LLM rerank stage on top of the vector pre-filter, and tuned for latency in [Phase 5.1](phase-5-llm-reranking.md#follow-up-51--search-latency) (top-K reduced from 20 to 10, pagination disabled, two-stage dashboard loading text). Expected end-to-end latency is now in the 2–4 s range, dominated by the slowest Gemini rerank call.

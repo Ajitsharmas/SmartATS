@@ -75,10 +75,26 @@ services:
     ports:
       - "5432:5432"
 
-  # 6. The Redis Broker
+  # 6. The Redis Broker (also used for rate-limit counters, query-embedding
+  # cache, and chat history).
+  #
+  # --maxmemory               cap memory usage so Redis cannot starve the VM
+  # --maxmemory-policy        volatile-lru: when memory is full, evict the
+  #                           least-recently-used keys that have a TTL. Keys
+  #                           without a TTL (Celery messages) are protected.
+  # --appendonly yes          AOF persistence — chat history and other state
+  #                           survive container restarts.
   redis:
     image: redis:7
     restart: always
+    command:
+      - redis-server
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - volatile-lru
+      - --appendonly
+      - "yes"
 
   # 7. MinIO S3 Storage
   minio:

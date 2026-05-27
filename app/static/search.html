@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Semantic Search - SmartATS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <style> body { font-family: 'Inter', sans-serif; } </style>
+</head>
+<body class="bg-slate-50 min-h-screen" data-route="search">
+
+    <nav class="bg-white border-b border-slate-200 shadow-sm h-14">
+        <div class="max-w-7xl mx-auto px-8 h-full flex items-center justify-between">
+            <a href="/dashboard" class="font-bold text-2xl text-indigo-600 tracking-tight">SmartATS</a>
+            <div class="flex items-center gap-6">
+                <a href="/dashboard" data-route="jobs"     class="nav-link text-sm font-medium text-slate-600 hover:text-indigo-600 transition">Jobs</a>
+                <a href="/search"    data-route="search"   class="nav-link text-sm font-medium text-slate-600 hover:text-indigo-600 transition">Search</a>
+                <a href="/settings"  data-route="settings" class="nav-link text-sm font-medium text-slate-600 hover:text-indigo-600 transition">Settings</a>
+            </div>
+            <div class="flex items-center gap-4">
+                <button id="aiStatusBtn"
+                    class="flex items-center gap-1.5 text-sm font-medium px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:border-indigo-400 hover:text-indigo-600 transition">
+                    <span id="aiStatusDot" class="w-2 h-2 rounded-full bg-slate-300"></span>
+                    <span id="aiStatusLabel">Check AI</span>
+                </button>
+                <button onclick="localStorage.removeItem('access_token'); window.location.href='/login'" class="text-sm text-slate-500 hover:text-red-600">Logout</button>
+            </div>
+        </div>
+    </nav>
+
+    <main class="max-w-4xl mx-auto p-8">
+
+        <header class="mb-6">
+            <h1 class="text-2xl font-bold text-slate-800">Semantic Search</h1>
+            <p class="text-sm text-slate-500 mt-1">
+                Find candidates by what they actually did, not just the keywords on their resume.
+                Phrase your query naturally — the AI re-ranks results by fit, not just word overlap.
+            </p>
+        </header>
+
+        <form id="searchForm" class="mb-8">
+            <div class="relative">
+                <input type="text" id="searchInput"
+                    placeholder='e.g. "Python engineer with cloud experience and team leadership"'
+                    class="w-full pl-12 pr-12 py-3.5 text-base border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition"
+                    minlength="3" maxlength="500" required>
+                <svg xmlns="http://www.w3.org/2000/svg" class="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                <button type="button" id="searchClearBtn" class="hidden absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600" title="Clear search">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+            </div>
+            <p class="text-xs text-slate-400 mt-2">Rate-limited to 5 searches/minute per recruiter.</p>
+        </form>
+
+        <div id="searchEmptyHint" class="text-center py-16 text-slate-400">
+            <p class="text-sm">Type a query above to search across your applicant pool.</p>
+        </div>
+
+        <div id="searchResultsLoading" class="hidden text-center py-12 text-slate-400">
+            <svg class="animate-spin mx-auto mb-3 w-6 h-6 text-indigo-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+            </svg>
+            <div id="searchResultsLoadingLabel" class="text-sm">Searching applicant pool…</div>
+        </div>
+
+        <div id="searchResultsEmpty" class="hidden text-center py-12 text-slate-400 text-sm">
+            No candidates matched this query above the relevance threshold.
+        </div>
+
+        <div id="searchResultsList" class="space-y-3"></div>
+
+    </main>
+
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/ai-status.js"></script>
+    <script src="/static/js/candidate-modal.js"></script>
+    <script src="/static/js/search-page.js"></script>
+</body>
+</html>

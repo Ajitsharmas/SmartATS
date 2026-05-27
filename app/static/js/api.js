@@ -113,6 +113,15 @@ class Api {
         window.location.href = "/login";
     }
 
+    // Page-guard helper. Call near the top of any authenticated-page JS
+    // module so users without a token land on /login instead of seeing the
+    // page flash and then bounce on the first API call.
+    static redirectIfNoToken() {
+        if (!this.getToken()) {
+            window.location.href = "/login";
+        }
+    }
+
     // --- 2. GENERIC REQUEST HANDLER ---
     // This is the "Engine" of our frontend. 
     // Instead of calling fetch() manually in every function, we route everything
@@ -223,6 +232,13 @@ class Api {
         return await this.request(`/applications/${applicationId}/retry`, "POST");
     }
 
+    // Force a full re-analysis of an application — runs scoring, embedding,
+    // and matching from scratch regardless of error state. Useful when the
+    // stored analysis is stale (bug fix, model change, candidate re-uploaded).
+    static async reanalyzeApplication(applicationId) {
+        return await this.request(`/applications/${applicationId}/reanalyze`, "POST");
+    }
+
     // Phase 2 — Semantic search across the recruiter's applicant pool.
     // Returns { results: [...], total_returned, has_more }.
     static async searchCandidates(query, offset = 0, limit = 10) {
@@ -249,6 +265,92 @@ class Api {
     // Rate-limited to 2/hour because it queues a task per application.
     static async refreshAllMatches() {
         return await this.request("/matches/refresh-all", "POST");
+    }
+
+    // Phase 3.1 — Inverse cross-job view.
+    // Candidates who applied to a *different* job owned by the same recruiter
+    // but match this job well. Read-only, no Gemini call.
+    static async getCrossApplicants(jobId) {
+        return await this.request(`/jobs/${jobId}/cross-applicants`);
+    }
+
+    // Phase 4 — Streaming RAG Q&A.
+    //
+    // POSTs the question + session_id and consumes the server-sent event
+    // stream. Conversation history is stored server-side in Redis, keyed by
+    // (user, application, session_id). A fresh session_id starts a new
+    // conversation; reusing one continues the existing one.
+    //
+    // EventSource doesn't support POST or custom auth headers, so we use
+    // fetch() + a ReadableStream reader and parse SSE frames manually.
+    //
+    // callbacks: { onToken(text), onCitations(citations), onSystemMessage(text), onError(detail), onDone() }
+    static async chatStream(applicationId, question, sessionId, callbacks) {
+        const token = this.getToken();
+        const response = await fetch(`${API_BASE}/applications/${applicationId}/chat`, {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${token}`,
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ question, session_id: sessionId }),
+        });
+
+        if (response.status === 401) {
+            this.logout();
+            return;
+        }
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            const detail = data.detail || `Chat request failed (${response.status})`;
+            callbacks.onError && callbacks.onError(detail);
+            callbacks.onDone && callbacks.onDone();
+            return;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            // SSE frames are separated by a blank line ("\n\n")
+            const frames = buffer.split("\n\n");
+            buffer = frames.pop();  // last item may be incomplete
+
+            for (const frame of frames) {
+                if (!frame.startsWith("data: ")) continue;
+                let event;
+                try {
+                    event = JSON.parse(frame.slice(6));
+                } catch (e) {
+                    continue;  // malformed frame — skip
+                }
+                switch (event.type) {
+                    case "token":
+                        callbacks.onToken && callbacks.onToken(event.content);
+                        break;
+                    case "citations":
+                        callbacks.onCitations && callbacks.onCitations(event.citations);
+                        break;
+                    case "system_message":
+                        callbacks.onSystemMessage && callbacks.onSystemMessage(event.content);
+                        break;
+                    case "error":
+                        callbacks.onError && callbacks.onError(event.detail);
+                        break;
+                    case "done":
+                        callbacks.onDone && callbacks.onDone();
+                        return;
+                }
+            }
+        }
+
+        // Stream ended without a `done` event — treat as completion anyway
+        callbacks.onDone && callbacks.onDone();
     }
 
     static async uploadResume(file) {

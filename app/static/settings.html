@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Settings - SmartATS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <style> body { font-family: 'Inter', sans-serif; } </style>
+</head>
+<body class="bg-slate-50 min-h-screen" data-route="settings">
+
+    <nav class="bg-white border-b border-slate-200 shadow-sm h-14">
+        <div class="max-w-7xl mx-auto px-8 h-full flex items-center justify-between">
+            <a href="/dashboard" class="font-bold text-2xl text-indigo-600 tracking-tight">SmartATS</a>
+            <div class="flex items-center gap-6">
+                <a href="/dashboard" data-route="jobs"     class="nav-link text-sm font-medium text-slate-600 hover:text-indigo-600 transition">Jobs</a>
+                <a href="/search"    data-route="search"   class="nav-link text-sm font-medium text-slate-600 hover:text-indigo-600 transition">Search</a>
+                <a href="/settings"  data-route="settings" class="nav-link text-sm font-medium text-slate-600 hover:text-indigo-600 transition">Settings</a>
+            </div>
+            <div class="flex items-center gap-4">
+                <button id="aiStatusBtn"
+                    class="flex items-center gap-1.5 text-sm font-medium px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:border-indigo-400 hover:text-indigo-600 transition">
+                    <span id="aiStatusDot" class="w-2 h-2 rounded-full bg-slate-300"></span>
+                    <span id="aiStatusLabel">Check AI</span>
+                </button>
+                <button onclick="localStorage.removeItem('access_token'); window.location.href='/login'" class="text-sm text-slate-500 hover:text-red-600">Logout</button>
+            </div>
+        </div>
+    </nav>
+
+    <main class="max-w-2xl mx-auto p-8">
+
+        <header class="mb-8">
+            <h1 class="text-2xl font-bold text-slate-800">Settings</h1>
+        </header>
+
+        <section class="bg-white rounded-xl border border-slate-200 shadow-sm p-6 mb-6">
+            <h2 class="text-sm font-semibold text-slate-700 uppercase tracking-wider mb-4">Account</h2>
+            <dl class="space-y-3">
+                <div class="flex justify-between items-baseline">
+                    <dt class="text-sm text-slate-500">Signed in as</dt>
+                    <dd id="settingsEmail" class="text-sm font-medium text-slate-800">—</dd>
+                </div>
+            </dl>
+        </section>
+
+        <section class="bg-white rounded-xl border border-slate-200 shadow-sm p-6 mb-6">
+            <h2 class="text-sm font-semibold text-slate-700 uppercase tracking-wider mb-2">Password</h2>
+            <p class="text-sm text-slate-500 mb-4">
+                We'll email a reset link to your account address. The link is valid for a short time and can only be used once.
+            </p>
+            <button id="changePasswordBtn" class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium text-sm">
+                Send password reset link
+            </button>
+        </section>
+
+        <section class="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+            <h2 class="text-sm font-semibold text-slate-700 uppercase tracking-wider mb-2">Session</h2>
+            <p class="text-sm text-slate-500 mb-4">Sign out of this browser. You'll need your password to sign in again.</p>
+            <button id="logoutBtn" class="px-4 py-2 bg-white border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 font-medium text-sm">
+                Log out
+            </button>
+        </section>
+
+    </main>
+
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/ai-status.js"></script>
+    <script src="/static/js/settings-page.js"></script>
+</body>
+</html>

@@ -25,6 +25,7 @@ from pathlib import Path
 # Ensure the project root is importable regardless of cwd
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from sqlalchemy import text
 from sqlmodel import Session, select
 
 from app.database import create_db_and_tables, engine
@@ -36,7 +37,12 @@ from app.models import (
     User,
 )
 from app.security import get_password_hash
-from app.worker import embed_job_task, embed_resume_task, match_jobs_task
+from app.worker import (
+    MATCH_MIN_SIMILARITY,
+    embed_job_task,
+    embed_resume_task,
+    match_jobs_task,
+)
 
 
 # Two jobs for recruiter A:
@@ -229,9 +235,64 @@ def main() -> None:
         if ids["job_tech_lead"] not in matched_job_ids:
             _fail(f"Expected Tech Lead in matches; got {matched_job_ids}")
         tech_lead_match = next(m for m in matches if m.matched_job_id == ids["job_tech_lead"])
-        if tech_lead_match.similarity < 0.7:
-            _fail(f"Tech Lead similarity {tech_lead_match.similarity:.3f} below 0.7 threshold")
+        if tech_lead_match.similarity < MATCH_MIN_SIMILARITY:
+            _fail(
+                f"Tech Lead similarity {tech_lead_match.similarity:.3f} below "
+                f"the configured threshold {MATCH_MIN_SIMILARITY}"
+            )
         _ok(f"Tech Lead match present with similarity {tech_lead_match.similarity:.3f}")
+
+    # ---- Phase 3.1 — inverse view: Alice should appear when querying the Tech Lead job ----
+    # Runs the exact SQL backing GET /jobs/{id}/cross-applicants so we exercise
+    # the join shape and ordering. The endpoint's auth path is tested in unit
+    # tests; this only validates the data pipeline.
+    inverse_query = text("""
+        SELECT
+            a.id            AS application_id,
+            a.candidate_name,
+            a.candidate_email,
+            orig.id         AS original_job_id,
+            orig.title      AS original_job_title,
+            m.similarity,
+            m.critique
+        FROM crossjobmatch m
+        JOIN application a   ON a.id = m.application_id
+        JOIN joblisting orig ON orig.id = a.job_id
+        WHERE m.matched_job_id = :job_id
+        ORDER BY m.similarity DESC
+        LIMIT 20
+    """)
+
+    with Session(engine) as session:
+        inverse_rows = session.execute(
+            inverse_query, {"job_id": ids["job_tech_lead"]}
+        ).fetchall()
+        if not inverse_rows:
+            _fail("Inverse view returned no rows for Tech Lead job — Alice's match did not join through")
+        alice_row = next((r for r in inverse_rows if r.application_id == ids["app_alice"]), None)
+        if alice_row is None:
+            _fail(f"Alice's application not in inverse view of Tech Lead job. Got {[r.application_id for r in inverse_rows]}")
+        if alice_row.original_job_id != ids["job_frontend"]:
+            _fail(f"Inverse view reports wrong original_job_id for Alice: {alice_row.original_job_id} (expected {ids['job_frontend']})")
+        if "frontend" not in alice_row.original_job_title.lower():
+            _fail(f"Inverse view reports wrong original_job_title: {alice_row.original_job_title!r}")
+        _ok(
+            f"Inverse view: Alice appears for Tech Lead job with similarity "
+            f"{float(alice_row.similarity):.3f}, original job '{alice_row.original_job_title}'"
+        )
+
+        # Multi-tenancy: querying recruiter B's job returns no cross-applicants
+        # from recruiter A. (CrossJobMatch is only computed within a pool, so
+        # this is more of a belt-and-braces check.)
+        rec_b_rows = session.execute(
+            inverse_query, {"job_id": ids["job_b"]}
+        ).fetchall()
+        if rec_b_rows:
+            _fail(
+                f"Multi-tenancy regression: recruiter B's job has {len(rec_b_rows)} "
+                f"cross-applicants pointing at recruiter A's pool"
+            )
+        _ok("Inverse view: recruiter B's job has no cross-applicants from recruiter A's pool")
 
     # Idempotency check — run the task again and verify the row count is the same
     match_jobs_task.apply(kwargs={"application_id": ids["app_alice"]}).get()

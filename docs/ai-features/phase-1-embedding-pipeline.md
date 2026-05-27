@@ -262,6 +262,44 @@ Note: retry needs the resume text. Since we don't store extracted text in the DB
 
 ---
 
+## Force re-analysis — `POST /applications/{id}/reanalyze`
+
+The Retry button only fires when the task previously **failed** (i.e. `scoring_error`, `embedding_error`, or `matching_error` is set). It does not help in cases where the AI pipeline completed *successfully* but produced wrong or stale results. Real examples:
+
+- An earlier bug truncated the resume text fed to scoring + embedding (the AI tasks returned successfully but with bad input)
+- The chunking strategy changed, so old chunks no longer match the current code
+- A candidate uploaded a new PDF and you want fresh analysis
+- The embedding model changed (e.g. dimension swap)
+
+`POST /applications/{id}/reanalyze` solves this. It is the **unconditional cousin** of `/retry`:
+
+| Behavior | `/retry` | `/reanalyze` |
+|---|---|---|
+| Requires an error column to be set | Yes | No |
+| Re-fetches PDF from MinIO and re-extracts text | Only if scoring or embedding failed | Always |
+| Re-dispatches `analyze_resume_task` | Only on scoring error | Always |
+| Re-dispatches `embed_resume_task` → `match_jobs_task` | Only on embedding/matching error | Always |
+| Clears stale chat history for this candidate | No | **Yes** — invalidates Phase 4 cache |
+| Rate limit | (uses the `/retry` limit) | 10 / minute per user |
+
+The dashboard surfaces it as a **"Re-analyze"** button in the candidate analysis modal (alongside Download Resume and Close), with a confirmation step that lists what will be overwritten.
+
+### Cache invalidation on re-analyze
+
+When re-analyzing, several cached / derived states would become stale. The endpoint handles them as follows:
+
+| Cached state | Action |
+|---|---|
+| Resume embeddings (`resumeembedding` rows) | Overwritten — `embed_resume_task` deletes-then-inserts when it runs |
+| Cross-job matches (`cross_job_match` rows) | Overwritten — `match_jobs_task` deletes-then-inserts |
+| AI score and critique (columns on `Application`) | Overwritten by `analyze_resume_task` |
+| **Chat history (Redis `chat:*:<app_id>:*`)** | **Cleared by `clear_application_chats(application_id)`**. Prior Q&A cited specific resume chunks that no longer exist after re-embedding; continuing those conversations would produce broken citations and stale context |
+| Query embedding cache (Redis `emb:*`) | Not touched — keyed by query text, not by application, so re-analyzing one application does not affect it |
+
+The response includes `chat_sessions_cleared` (count of Redis chat keys deleted) so the operation is observable.
+
+---
+
 ## Risks and mitigations
 
 | Risk | Mitigation |

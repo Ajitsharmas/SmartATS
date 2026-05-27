@@ -3,6 +3,7 @@
 # ---------------------------------------------------------------------------
 
 import io
+import json
 import uuid
 from contextlib import asynccontextmanager
 from typing import Annotated, List
@@ -20,10 +21,19 @@ from slowapi.util import get_remote_address
 from sqlalchemy import text
 from sqlmodel import Session, select
 
-from app.ai import AIProvider, GeminiUnavailableError, get_ai_provider
+from app.ai import (
+    AIProvider,
+    GeminiQuotaExhaustedError,
+    GeminiUnavailableError,
+    _classify_gemini_error,
+    get_ai_provider,
+)
 from app.auth import auth_router, get_current_user
 from app.config import settings
+from app.chat_history import append_turn, clear_application_chats, load_history
 from app.embeddings import EmbeddingError, embed_query_cached
+from app.rag import stream_rag_answer
+from app.rerank import clear_application_rerank_cache, rerank_parallel
 from app.limiter import get_user_key, limiter
 
 # Import our local modules
@@ -34,10 +44,14 @@ from app.models import (
     AnalysisRequest,
     Application,
     ApplicationSubmit,
+    ChatRequest,
+    Citation,
+    CrossApplicantResult,
     CrossJobMatch,
     CrossJobMatchResult,
     JobListing,
     JobListingUpdate,
+    ResumeEmbedding,
     SearchQuery,
     SearchResponse,
     SearchResult,
@@ -85,6 +99,22 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
+# Force browsers to revalidate every /static/* asset on each page load.
+# Without this, a redeploy that changes JS/CSS can be invisible to users on
+# the old cached version — we hit this in production when adding methods to
+# api.js wasn't picked up until users hard-refreshed.
+#
+# `no-cache` means "you may cache, but always send a conditional request"
+# (If-None-Match / If-Modified-Since). The server returns 304 if unchanged,
+# so the actual byte cost only kicks in when the file truly changes.
+@app.middleware("http")
+async def _static_no_cache_middleware(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
+
+
 # 3. PAGE ROUTES (Serving HTML)
 # These endpoints just return the raw HTML files.
 # The JavaScript inside those files will call our JSON APIs later.
@@ -96,10 +126,44 @@ async def read_root():
     return FileResponse("app/static/index.html", headers=_NO_CACHE)
 
 
+@app.get("/job/{job_id}", include_in_schema=False)
+async def read_public_job_page(job_id: int):
+    """
+    Serve the candidate-facing single-job page (job-details.html). Public —
+    no auth required. The page reads the job id from window.location.pathname
+    and fetches the job's data via the existing public `GET /jobs` listing.
+    Path is singular (/job/{id}) to distinguish from the authenticated
+    recruiter route /jobs/{id} that serves the recruiter dashboard view.
+    """
+    return FileResponse("app/static/job-details.html", headers=_NO_CACHE)
+
+
 @app.get("/dashboard", include_in_schema=False)
 async def read_dashboard():
-    """Serve the recruiter dashboard (dashboard.html). Requires a valid JWT stored in localStorage."""
+    """Serve the recruiter jobs-overview page (dashboard.html). Requires a valid JWT stored in localStorage."""
     return FileResponse("app/static/dashboard.html", headers=_NO_CACHE)
+
+
+@app.get("/jobs/{job_id}", include_in_schema=False)
+async def read_job_page(job_id: int):
+    """
+    Serve the per-job page (job.html). The job_id is read client-side from
+    window.location.pathname; auth and ownership are enforced by the JSON
+    APIs the page calls. Path param is declared so FastAPI routes correctly.
+    """
+    return FileResponse("app/static/job.html", headers=_NO_CACHE)
+
+
+@app.get("/search", include_in_schema=False)
+async def read_search_page():
+    """Serve the semantic-search page (search.html). Requires a valid JWT."""
+    return FileResponse("app/static/search.html", headers=_NO_CACHE)
+
+
+@app.get("/settings", include_in_schema=False)
+async def read_settings_page():
+    """Serve the account-settings page (settings.html). Requires a valid JWT."""
+    return FileResponse("app/static/settings.html", headers=_NO_CACHE)
 
 
 @app.get("/login", include_in_schema=False)
@@ -188,6 +252,14 @@ async def check_ai_health(request: Request, ai: AIDep):
             "provider": settings.AI_MODE,
             "message": "AI provider is online and responding correctly.",
             "response": response,
+        }
+    except GeminiQuotaExhaustedError:
+        # Daily free-tier quota used up — different from transient high-demand
+        # because the wait is hours-to-tomorrow, not minutes.
+        return {
+            "status": "unavailable",
+            "provider": settings.AI_MODE,
+            "message": "Gemini's daily free-tier quota has been exhausted. The limit resets in roughly 24 hours, or you can upgrade your Gemini API plan for higher limits.",
         }
     except GeminiUnavailableError:
         return {
@@ -490,8 +562,13 @@ async def upload_resume(
         "file_id": file_id,
         "filename": file.filename,
         "s3_key": s3_key,
-        "extracted_text_preview": extracted_text[:200] + "...",
-        "file_url": file_url,  # Needed for the frontend!
+        # Full extracted text — sent to /process so AI scoring and embedding
+        # see the entire resume, not a truncated preview. Truncating here
+        # caused a real bug where embeddings only saw the first ~200 chars.
+        "extracted_text": extracted_text,
+        # Short preview kept for display/debug purposes (200 chars + ellipsis)
+        "extracted_text_preview": extracted_text[:200] + ("..." if len(extracted_text) > 200 else ""),
+        "file_url": file_url,
     }
 
 
@@ -579,6 +656,7 @@ SELECT
     a.candidate_name,
     a.candidate_email,
     a.resume_url,
+    j.id    AS job_id,
     j.title AS job_title,
     rc.chunk_text AS best_match_chunk,
     rc.similarity
@@ -591,12 +669,76 @@ ORDER BY rc.similarity DESC
 LIMIT :limit OFFSET :offset
 """
 
-SEARCH_MIN_SIMILARITY = 0.6
+# Vector pre-filter threshold for the Phase 5 two-stage flow. Lower than the
+# previous one-stage threshold (0.7) because the LLM rerank does the real
+# precision filtering downstream — we want the pre-filter to surface more
+# candidates so the LLM has a richer set to choose from.
+SEARCH_VECTOR_MIN_SIMILARITY = 0.55
+
+# LLM rerank score (0–100) below which a candidate is not surfaced to the
+# recruiter. Calibrated independently of the vector threshold — they have
+# different semantics.
+SEARCH_LLM_MIN_SCORE = 60
+
+# Top-K candidates to pull from the vector pre-filter for LLM scoring.
+# Phase 5.1 — lowered from 20 to 10 to halve LLM fan-out and reduce search
+# latency. The bottom half of a top-20 pre-filter was almost always either
+# rejected by the LLM threshold or duplicated higher-scoring candidates, so
+# the recall cost is small in normal recruiter pool sizes. Pagination via
+# `offset` is currently inert (see SearchQuery docstring).
+SEARCH_PREFILTER_TOP_K = 10
+
+
+def _fetch_top_resume_chunks(
+    session: Session,
+    application_ids: list[int],
+    query_vector: list[float],
+    top_k: int,
+) -> dict[int, str]:
+    """
+    Phase 5.2 — retrieve the top-K resume chunks per application by cosine
+    distance to `query_vector`, plus chunk 0 always (resume header — carries
+    seniority/role-level signal that may not vector-match the query).
+
+    Concatenated in original chunk-index order so the LLM sees the resume in
+    document order, not relevance order. Returns {application_id: text}.
+    """
+    if not application_ids:
+        return {}
+    rows = session.execute(
+        text("""
+            WITH ranked AS (
+                SELECT
+                    application_id,
+                    chunk_index,
+                    chunk_text,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY application_id
+                        ORDER BY embedding <=> (:query_vector)::vector
+                    ) AS rank
+                FROM resumeembedding
+                WHERE application_id = ANY(:ids)
+            )
+            SELECT application_id, chunk_index, chunk_text
+            FROM ranked
+            WHERE rank <= :top_k OR chunk_index = 0
+            ORDER BY application_id, chunk_index
+        """),
+        {
+            "ids": application_ids,
+            "query_vector": str(query_vector),
+            "top_k": top_k,
+        },
+    ).fetchall()
+    texts: dict[int, list[str]] = {}
+    for r in rows:
+        texts.setdefault(r.application_id, []).append(r.chunk_text)
+    return {app_id: "\n".join(chunks) for app_id, chunks in texts.items()}
 
 
 @app.post("/search/candidates", response_model=SearchResponse, tags=["AI"])
-@limiter.limit("10/minute", key_func=get_user_key)
-def search_candidates(
+@limiter.limit("5/minute", key_func=get_user_key)
+async def search_candidates(
     request: Request,
     payload: SearchQuery,
     session: SessionDep,
@@ -605,18 +747,36 @@ def search_candidates(
     """
     Semantic search across the authenticated recruiter's applicant pool. Protected.
 
-    Embeds the query text, then runs a vector-similarity search over
-    `resume_embedding`, restricted to applications for jobs owned by the
-    current recruiter. Returns one row per candidate with the resume chunk
-    that matched best, ranked by cosine similarity (≥ 0.6), paginated.
+    Two-stage retrieve-then-rerank (Phase 5):
 
-    Query embeddings are cached in Redis for one hour to absorb repeated
-    searches without hitting Gemini.
+    1. **Vector pre-filter** — embed the query, run pgvector cosine similarity
+       restricted to applications for jobs the recruiter owns, take the top
+       SEARCH_PREFILTER_TOP_K candidates above SEARCH_VECTOR_MIN_SIMILARITY.
+    2. **LLM rerank** — for each pre-filter survivor, send the full resume
+       text + the query to Gemini in parallel; receive an honest 0–100 score
+       and a one-paragraph critique.
+    3. **Final filter** — drop results below SEARCH_LLM_MIN_SCORE, sort by
+       LLM score.
+
+    Query embeddings are cached in Redis for an hour. LLM rerank scores are
+    also cached, keyed by (application_id, query_text, resume_text), so
+    repeated searches against unchanged data don't hit Gemini at all.
+
+    If LLM rerank fails entirely (Gemini outage), the response falls back to
+    vector-only ranking with `degraded=true` so the dashboard can surface a
+    notice. Individual LLM call failures within a single request fall back
+    silently to vector similarity for that candidate only.
+
+    Pagination note (Phase 5.1): `SearchQuery.offset` is accepted for back-
+    compat but currently inert. We only LLM-rerank SEARCH_PREFILTER_TOP_K
+    candidates per request, so deeper paging would require re-issuing the
+    pre-filter with a larger K — deferred until a recruiter actually asks.
+    `has_more` is therefore always `False`.
 
     **Errors:**
     - `401` – missing or invalid token
-    - `429` – rate limit hit (10 searches/minute per user)
-    - `503` – embedding provider unavailable (transient — retry shortly)
+    - `429` – rate limit hit (5 searches/minute per user)
+    - `503` – embedding provider unavailable for pre-filter (retry shortly)
     """
     try:
         query_vector = embed_query_cached(payload.query)
@@ -626,34 +786,86 @@ def search_candidates(
             detail=f"Search temporarily unavailable: {e}",
         )
 
+    # Cap the requested page size at the pre-filter top-K — we never have more
+    # ranked candidates than that in a single request.
+    effective_limit = min(payload.limit, SEARCH_PREFILTER_TOP_K)
+
+    # --- Stage 1: vector pre-filter ---
     rows = session.execute(
         text(SEARCH_SQL),
         {
             "query_vector": str(query_vector),
             "owner_id": current_user.id,
-            "min_similarity": SEARCH_MIN_SIMILARITY,
-            "limit": payload.limit,
-            "offset": payload.offset,
+            "min_similarity": SEARCH_VECTOR_MIN_SIMILARITY,
+            "limit": SEARCH_PREFILTER_TOP_K,
+            "offset": 0,
         },
     ).fetchall()
 
-    results = [
-        SearchResult(
-            application_id=row.application_id,
-            candidate_name=row.candidate_name,
-            candidate_email=row.candidate_email,
-            resume_url=row.resume_url,
-            job_title=row.job_title,
-            best_match_chunk=row.best_match_chunk,
-            similarity=float(row.similarity),
-        )
-        for row in rows
+    if not rows:
+        return SearchResponse(results=[], total_returned=0, has_more=False, degraded=False)
+
+    # --- Stage 2: LLM rerank in parallel ---
+    # Phase 5.2 — send top-K resume chunks (by similarity to the search query)
+    # plus chunk 0, not the full resume. K is settings.RERANK_RESUME_CHUNK_TOP_K.
+    application_ids = [r.application_id for r in rows]
+    top_chunk_texts = _fetch_top_resume_chunks(
+        session,
+        application_ids,
+        query_vector,
+        settings.RERANK_RESUME_CHUNK_TOP_K,
+    )
+
+    pairs = [
+        (r.application_id, payload.query, top_chunk_texts.get(r.application_id, r.best_match_chunk))
+        for r in rows
     ]
+    rerank_results = await rerank_parallel(pairs)
+
+    # If every single rerank call failed, fall back to vector-only ordering
+    degraded = all(rr is None for rr in rerank_results)
+
+    # --- Stage 3: combine, filter, sort ---
+    combined: list[SearchResult] = []
+    for row, rerank in zip(rows, rerank_results):
+        if rerank is not None:
+            llm_score = rerank.score
+            if llm_score < SEARCH_LLM_MIN_SCORE:
+                continue
+            combined.append(SearchResult(
+                application_id=row.application_id,
+                candidate_name=row.candidate_name,
+                candidate_email=row.candidate_email,
+                resume_url=row.resume_url,
+                job_id=row.job_id,
+                job_title=row.job_title,
+                best_match_chunk=row.best_match_chunk,
+                similarity=llm_score / 100.0,
+                critique=rerank.critique,
+            ))
+        elif degraded:
+            # Whole-request fallback path — keep candidate using vector score
+            combined.append(SearchResult(
+                application_id=row.application_id,
+                candidate_name=row.candidate_name,
+                candidate_email=row.candidate_email,
+                resume_url=row.resume_url,
+                job_id=row.job_id,
+                job_title=row.job_title,
+                best_match_chunk=row.best_match_chunk,
+                similarity=float(row.similarity),
+                critique=None,
+            ))
+        # else: individual LLM call failed but others succeeded — drop this one
+
+    combined.sort(key=lambda r: r.similarity, reverse=True)
+    page = combined[:effective_limit]
 
     return SearchResponse(
-        results=results,
-        total_returned=len(results),
-        has_more=len(results) == payload.limit,
+        results=page,
+        total_returned=len(page),
+        has_more=False,
+        degraded=degraded,
     )
 
 
@@ -739,6 +951,105 @@ def retry_application(
     return {"message": "Retry dispatched", "application_id": application_id}
 
 
+@app.post("/applications/{application_id}/reanalyze", tags=["Applications"])
+@limiter.limit("10/minute", key_func=get_user_key)
+def reanalyze_application(
+    request: Request,
+    application_id: int,
+    session: SessionDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    """
+    Force a full re-analysis of an application regardless of error state.
+    Protected.
+
+    Unlike `/retry`, which only re-dispatches tasks that have a recorded
+    error, this endpoint re-runs the full AI pipeline unconditionally:
+    scoring, embedding, and cross-job matching. Useful when stored analysis
+    is stale or wrong but no task has actually failed (e.g. an earlier bug
+    truncated input text, the chunking strategy changed, a candidate
+    re-uploaded their PDF).
+
+    Flow:
+    1. Fetch the stored PDF from MinIO and re-extract text server-side
+       (the canonical extraction path — always sees the full resume,
+       independent of any frontend bugs).
+    2. Re-dispatch `analyze_resume_task` (scoring).
+    3. Chain `embed_resume_task` → `match_jobs_task` so matching runs
+       only after embedding succeeds.
+    4. Clear all error columns and reset status to "pending".
+
+    **Errors:**
+    - `401` – missing or invalid token
+    - `403` – the parent job belongs to a different recruiter
+    - `404` – application not found
+    - `500` – the PDF could not be read from MinIO
+    """
+    app_record = session.get(Application, application_id)
+    if not app_record:
+        raise HTTPException(status_code=404, detail="Application not found.")
+
+    parent_job = session.get(JobListing, app_record.job_id)
+    if not parent_job:
+        raise HTTPException(status_code=404, detail="Parent job not found.")
+    if parent_job.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized.")
+
+    # Re-extract resume text from MinIO. This is the canonical extraction
+    # path — same one rescore_application_task uses — and always gets the
+    # full resume regardless of any frontend bugs.
+    s3_key = app_record.resume_url.split("/download/")[-1]
+    try:
+        s3 = get_s3_client()
+        obj = s3.get_object(Bucket=settings.MINIO_BUCKET_NAME, Key=s3_key)
+        pdf_bytes = obj["Body"].read()
+        pdf_reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        text_content = "".join(page.extract_text() or "" for page in pdf_reader.pages)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not re-read resume from storage: {e}")
+
+    # Invalidate cached state that becomes stale when the resume is re-embedded:
+    #
+    # - Chat history (Phase 4) — any prior Q&A cited specific resume chunks
+    #   that will be replaced by the new embedding run. Continuing those
+    #   conversations would produce broken citations and confused context,
+    #   so we clear all sessions for this application.
+    # - LLM rerank cache (Phase 5) — cached scores reference the prior resume
+    #   text. After re-extraction the resume content may differ, so scores
+    #   computed against the old text are no longer trustworthy.
+    # - Cross-job matches — NOT cleared here. `match_jobs_task` is idempotent
+    #   (delete-then-insert), so it self-cleans when it runs below.
+    # - Query embedding cache (`emb:*`) — keyed by query text, not application,
+    #   so it's not affected by changes to a single application's data.
+    cleared_chats = clear_application_chats(application_id)
+    cleared_rerank = clear_application_rerank_cache(application_id)
+
+    # Re-dispatch all three pipelines. Scoring runs in parallel; embedding
+    # and matching are chained because match needs embeddings to exist.
+    analyze_resume_task.delay(text_content=text_content, application_id=application_id)
+    chain(
+        embed_resume_task.s(text_content=text_content, application_id=application_id),
+        match_jobs_task.si(application_id=application_id),
+    ).apply_async()
+
+    # Reset state — clear stale errors and set status to pending while the
+    # new pipeline runs. The successful tasks will clear their own errors
+    # via the existing auto-recovery logic.
+    app_record.scoring_error = None
+    app_record.embedding_error = None
+    app_record.matching_error = None
+    app_record.status = "pending"
+    session.add(app_record)
+    session.commit()
+
+    return {
+        "message": "Full re-analysis dispatched",
+        "application_id": application_id,
+        "chat_sessions_cleared": cleared_chats,
+        "rerank_cache_entries_cleared": cleared_rerank,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Phase 3 — Cross-job match endpoints
 # ---------------------------------------------------------------------------
@@ -788,13 +1099,83 @@ def get_application_matches(
             matched_job_id=match.matched_job_id,
             job_title=job.title,
             similarity=match.similarity,
+            critique=match.critique,
         )
         for match, job in rows
     ]
 
 
+@app.get(
+    "/jobs/{job_id}/cross-applicants",
+    response_model=List[CrossApplicantResult],
+    tags=["AI"],
+)
+@limiter.limit("60/minute", key_func=get_user_key)
+def get_job_cross_applicants(
+    request: Request,
+    job_id: int,
+    session: SessionDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    """
+    List candidates who applied to a *different* job owned by the same recruiter
+    but are strong fits for this one (Phase 3.1 — the inverse view of cross-job
+    matches). Read-only DB query — no Gemini call.
+
+    Cross-job matches are only computed within a recruiter's own pool
+    (`cand.owner_id = orig.owner_id` clause in CROSS_JOB_MATCH_SQL), so verifying
+    ownership of the target `job_id` is sufficient — the originating jobs are
+    necessarily owned by the same recruiter.
+
+    **Errors:**
+    - `401` – missing or invalid token
+    - `403` – the job belongs to a different recruiter
+    - `404` – job not found
+    """
+    job = session.get(JobListing, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized.")
+
+    rows = session.execute(
+        text("""
+            SELECT
+                a.id            AS application_id,
+                a.candidate_name,
+                a.candidate_email,
+                a.resume_url,
+                orig.id         AS original_job_id,
+                orig.title      AS original_job_title,
+                m.similarity,
+                m.critique
+            FROM crossjobmatch m
+            JOIN application a   ON a.id = m.application_id
+            JOIN joblisting orig ON orig.id = a.job_id
+            WHERE m.matched_job_id = :job_id
+            ORDER BY m.similarity DESC
+            LIMIT 20
+        """),
+        {"job_id": job_id},
+    ).fetchall()
+
+    return [
+        CrossApplicantResult(
+            application_id=r.application_id,
+            candidate_name=r.candidate_name,
+            candidate_email=r.candidate_email,
+            resume_url=r.resume_url,
+            original_job_id=r.original_job_id,
+            original_job_title=r.original_job_title,
+            similarity=float(r.similarity),
+            critique=r.critique,
+        )
+        for r in rows
+    ]
+
+
 @app.post("/applications/{application_id}/match-refresh", tags=["AI"])
-@limiter.limit("10/minute", key_func=get_user_key)
+@limiter.limit("5/minute", key_func=get_user_key)   # Phase 5 — each match now fires ~10 LLM calls
 def refresh_application_matches(
     request: Request,
     application_id: int,
@@ -827,7 +1208,7 @@ def refresh_application_matches(
 
 
 @app.post("/matches/refresh-all", tags=["AI"])
-@limiter.limit("2/hour", key_func=get_user_key)
+@limiter.limit("1/hour", key_func=get_user_key)     # Phase 5 — bulk × LLM rerank is heavy
 def refresh_all_matches(
     request: Request,
     session: SessionDep,
@@ -859,6 +1240,194 @@ def refresh_all_matches(
         "message": "Bulk match refresh dispatched",
         "tasks_queued": len(application_ids),
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — RAG Q&A streaming chat endpoint
+# ---------------------------------------------------------------------------
+#
+# SQL for per-application chunk retrieval. Much simpler than the Phase 2 search
+# SQL because we're scoped to one resume and want every relevant chunk back,
+# not "one row per candidate".
+CHAT_RETRIEVAL_SQL = """
+SELECT
+    chunk_index,
+    chunk_text,
+    1 - (embedding <=> CAST(:query_vector AS vector)) AS similarity
+FROM resumeembedding
+WHERE application_id = :application_id
+ORDER BY embedding <=> CAST(:query_vector AS vector)
+LIMIT :top_k
+"""
+
+CHAT_TOP_K = 5
+
+
+def _chat_error_event(exc: BaseException, *, default_message: str) -> str:
+    """
+    Convert any LLM-or-embedding-side exception raised during a chat stream
+    into a clean SSE event. Daily-quota and transient-unavailable cases use
+    the soft `system_message` channel (amber notice in the dashboard); only
+    truly unexpected failures go through `error` (red). We deliberately never
+    surface the raw provider exception text — Gemini's 429 body is a 2 KB JSON
+    blob that's useless to the recruiter.
+    """
+    # Unwrap a single layer of `raise X from e` so EmbeddingError("Failed...: <raw>")
+    # is classified by the original Gemini exception, not the wrapper.
+    candidate = exc.__cause__ if exc.__cause__ is not None else exc
+    classified = _classify_gemini_error(candidate) or _classify_gemini_error(exc)
+
+    if isinstance(classified, GeminiQuotaExhaustedError):
+        return _sse("system_message", {
+            "content": (
+                "Gemini's daily free-tier quota has been exhausted. "
+                "The chat will be available again once the quota resets "
+                "(usually within 24 hours), or you can upgrade your Gemini API plan for higher limits."
+            ),
+        })
+    if isinstance(classified, GeminiUnavailableError):
+        return _sse("system_message", {
+            "content": (
+                "Gemini is experiencing high demand right now and could not respond. "
+                "Please try again in a few minutes."
+            ),
+        })
+    # Unknown failure — keep the message generic; the raw exception is logged
+    # server-side but not shown to the user.
+    print(f"chat: unexpected error: {type(exc).__name__}: {exc}")
+    return _sse("error", {"detail": default_message})
+
+
+def _sse(event_type: str, payload: dict) -> str:
+    """Format a JSON payload as a server-sent event."""
+    body = json.dumps({"type": event_type, **payload})
+    return f"data: {body}\n\n"
+
+
+@app.post("/applications/{application_id}/chat", tags=["AI"])
+@limiter.limit("5/minute", key_func=get_user_key)
+def chat_with_resume(
+    request: Request,
+    application_id: int,
+    payload: ChatRequest,
+    session: SessionDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    """
+    Streaming RAG Q&A over a single candidate's resume. Protected.
+
+    Embeds the recruiter's question, retrieves the top-5 most relevant chunks
+    of *this candidate's* resume, and streams Gemini's grounded answer back
+    via server-sent events. The recruiter's frontend renders tokens
+    incrementally and shows the cited chunks below the answer.
+
+    See `docs/ai-features/phase-4-rag-qa.md` for the SSE event schema, the
+    citation-required system prompt, and the conversation-history protocol
+    (frontend-managed sliding window of 6 turns).
+
+    **Errors:**
+    - `401` – missing or invalid token
+    - `403` – the parent job belongs to a different recruiter
+    - `404` – application not found
+    - `429` – rate limit hit (5 chat requests / minute per user)
+    - SSE `error` event – Gemini failures mid-stream are recoverable; surfaced
+      to the frontend as a recruiter-readable error inside the open stream
+    """
+    # --- Authorization (runs BEFORE the stream opens) ---
+    app_record = session.get(Application, application_id)
+    if not app_record:
+        raise HTTPException(status_code=404, detail="Application not found.")
+
+    parent_job = session.get(JobListing, app_record.job_id)
+    if not parent_job or parent_job.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized.")
+
+    question = payload.question
+    session_id = payload.session_id
+    user_id = current_user.id
+
+    def event_stream():
+        # --- Early exit: this resume has no embeddings yet ---
+        chunks_exist = session.execute(
+            select(ResumeEmbedding.id)
+            .where(ResumeEmbedding.application_id == application_id)
+            .limit(1)
+        ).first()
+        if not chunks_exist:
+            yield _sse("system_message", {
+                "content": (
+                    "This candidate's resume has not been processed for AI Q&A yet. "
+                    "Try the Retry button on the candidate row, or upload again."
+                )
+            })
+            yield _sse("done", {})
+            return
+
+        # --- Load prior conversation from Redis ---
+        # Falls back to empty list on Redis error — chat still works without context
+        history = load_history(user_id, application_id, session_id)
+
+        # --- Embed the question (Phase 2 Redis cache reused) ---
+        try:
+            query_vector = embed_query_cached(question)
+        except EmbeddingError as e:
+            yield _chat_error_event(e, default_message="Could not process your question right now. Please try again.")
+            yield _sse("done", {})
+            return
+
+        # --- Retrieve top-K chunks from this resume only ---
+        rows = session.execute(
+            text(CHAT_RETRIEVAL_SQL),
+            {
+                "query_vector": str(query_vector),
+                "application_id": application_id,
+                "top_k": CHAT_TOP_K,
+            },
+        ).fetchall()
+
+        citations = [
+            Citation(
+                chunk_index=row.chunk_index,
+                chunk_text=row.chunk_text,
+                similarity=float(row.similarity),
+            )
+            for row in rows
+        ]
+
+        # --- Stream the grounded answer from Gemini ---
+        accumulated = ""
+        try:
+            for token in stream_rag_answer(question, citations, history):
+                accumulated += token
+                yield _sse("token", {"content": token})
+        except Exception as e:
+            yield _chat_error_event(e, default_message="Sorry, the AI service could not generate a response. Please try again.")
+            yield _sse("done", {})
+            return
+
+        # --- After all tokens, send citations + done ---
+        yield _sse(
+            "citations",
+            {"citations": [c.model_dump() for c in citations]},
+        )
+        yield _sse("done", {})
+
+        # --- Persist this turn to Redis AFTER the response is sent.
+        # We persist both the user's question and the full assistant reply so
+        # the next request can see them in history. If accumulated is empty
+        # (unlikely — would mean Gemini sent zero tokens), we skip storage.
+        if accumulated:
+            append_turn(user_id, application_id, session_id, "user", question)
+            append_turn(user_id, application_id, session_id, "assistant", accumulated)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # Nginx: do not buffer SSE
+        },
+    )
 
 
 # --- Processing ROUTES (The Main Workflow) ---

@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Job Details - SmartATS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+</head>
+
+<body class="bg-slate-50 min-h-screen text-slate-800">
+
+    <header class="bg-gradient-to-r from-indigo-600 to-purple-700 text-white shadow-lg">
+        <nav class="max-w-5xl mx-auto px-6 h-16 flex justify-between items-center">
+            <a href="/" class="font-bold text-xl tracking-tight">SmartATS</a>
+            <a href="/login" class="text-sm font-medium bg-white/10 hover:bg-white/20 px-4 py-2 rounded-lg transition">
+                Recruiter Login
+            </a>
+        </nav>
+    </header>
+
+    <main class="max-w-5xl mx-auto px-6 py-8">
+
+        <a href="/" class="inline-flex items-center text-sm text-slate-500 hover:text-indigo-600 transition mb-4">
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 mr-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+            All open positions
+        </a>
+
+        <!-- Initial states: loading / not-found -->
+        <div id="loadingState" class="bg-white border border-slate-200 rounded-xl p-12 text-center text-slate-400">
+            Loading job…
+        </div>
+
+        <div id="notFoundState" class="hidden bg-white border border-slate-200 rounded-xl p-12 text-center">
+            <i data-lucide="search-x" class="w-10 h-10 mx-auto text-slate-300 mb-3"></i>
+            <h2 class="text-lg font-bold text-slate-700">Job not found</h2>
+            <p class="text-sm text-slate-500 mt-1">This position may have been closed or removed.</p>
+            <a href="/" class="inline-block mt-4 text-sm font-medium text-indigo-600 hover:text-indigo-800">Browse other open positions →</a>
+        </div>
+
+        <!-- Two-column layout once the job loads: details on the left, apply form on the right. -->
+        <div id="jobLayout" class="hidden grid grid-cols-1 lg:grid-cols-3 gap-8">
+
+            <article class="lg:col-span-2 bg-white border border-slate-200 rounded-xl shadow-sm p-8">
+                <h1 id="jobTitle" class="text-3xl font-bold text-slate-800 leading-tight"></h1>
+                <div id="jobIdLabel" class="text-sm text-slate-400 mt-1"></div>
+
+                <div class="flex flex-wrap gap-x-6 gap-y-1 text-sm text-slate-500 mt-4">
+                    <span id="jobLocation"></span>
+                    <span id="jobSalary"></span>
+                    <span id="jobPostedAt"></span>
+                </div>
+
+                <div class="mt-6">
+                    <h2 class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Required skills</h2>
+                    <div id="jobSkills" class="flex flex-wrap gap-1.5"></div>
+                </div>
+
+                <div class="mt-6">
+                    <h2 class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Description</h2>
+                    <div id="jobDescription" class="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed bg-slate-50 border border-slate-100 rounded-lg p-4"></div>
+                </div>
+            </article>
+
+            <aside class="lg:col-span-1">
+                <div class="sticky top-8 bg-white border border-slate-200 rounded-xl shadow-xl p-6">
+
+                    <h2 class="text-lg font-bold text-slate-800 mb-1">Apply for this role</h2>
+                    <p class="text-xs text-slate-500 mb-5">Upload your resume — our AI scores your fit instantly.</p>
+
+                    <form id="applicationForm" class="space-y-4">
+                        <div>
+                            <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Full Name</label>
+                            <input type="text" id="candidateName" required placeholder="Jane Doe"
+                                class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none">
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Email</label>
+                            <input type="email" id="candidateEmail" required placeholder="jane@example.com"
+                                class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none">
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Resume (PDF)</label>
+                            <div id="dropZone"
+                                class="border-2 border-dashed border-slate-300 rounded-lg p-5 text-center hover:bg-slate-50 cursor-pointer">
+                                <i data-lucide="upload-cloud" class="w-7 h-7 text-slate-400 mx-auto mb-2"></i>
+                                <p class="text-xs text-slate-600">Click to upload PDF</p>
+                                <input type="file" id="resumeInput" class="hidden" accept=".pdf">
+                                <div id="fileNameDisplay" class="text-xs text-indigo-600 font-bold mt-2 hidden"></div>
+                            </div>
+                        </div>
+
+                        <button type="submit" id="submitBtn"
+                            class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-lg shadow-md transition">
+                            Submit Application
+                        </button>
+                    </form>
+
+                    <div id="successState" class="hidden text-center py-6">
+                        <div class="w-14 h-14 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-3">
+                            <i data-lucide="check" class="w-7 h-7 text-green-600"></i>
+                        </div>
+                        <h3 class="text-base font-bold text-slate-800">Application Sent!</h3>
+                        <p class="text-xs text-slate-500 mb-3">Our AI is analyzing your profile now.</p>
+                        <a href="/" class="text-indigo-600 text-sm font-medium hover:underline">Browse more positions</a>
+                    </div>
+                </div>
+            </aside>
+
+        </div>
+
+    </main>
+
+    <script src="/static/js/api.js"></script>
+    <script>
+        lucide.createIcons();
+
+        // Pull the job id from the URL: /job/42 → 42
+        const pathParts = window.location.pathname.split('/').filter(Boolean);
+        const jobId = Number(pathParts[1]);
+
+        let selectedJob = null;
+
+        async function loadJob() {
+            if (!Number.isFinite(jobId)) {
+                document.getElementById('loadingState').classList.add('hidden');
+                document.getElementById('notFoundState').classList.remove('hidden');
+                lucide.createIcons();
+                return;
+            }
+            try {
+                const jobs = await Api.getJobs();
+                const job = jobs.find(j => j.id === jobId);
+                if (!job) {
+                    document.getElementById('loadingState').classList.add('hidden');
+                    document.getElementById('notFoundState').classList.remove('hidden');
+                    lucide.createIcons();
+                    return;
+                }
+                selectedJob = job;
+                renderJob(job);
+            } catch (e) {
+                console.error(e);
+                document.getElementById('loadingState').classList.add('hidden');
+                document.getElementById('notFoundState').classList.remove('hidden');
+                lucide.createIcons();
+            }
+        }
+
+        function renderJob(job) {
+            document.title = `${job.title} - SmartATS`;
+            document.getElementById('jobTitle').textContent = job.title;
+            document.getElementById('jobIdLabel').textContent = `Job ID: ${job.id}`;
+            document.getElementById('jobLocation').textContent = job.location ? `Location: ${job.location}` : '';
+            document.getElementById('jobSalary').textContent = job.salary_range ? `Salary: ${job.salary_range}` : '';
+
+            const postedEl = document.getElementById('jobPostedAt');
+            if (job.created_at) {
+                const d = new Date(job.created_at);
+                postedEl.textContent = !isNaN(d)
+                    ? `Posted: ${d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}`
+                    : '';
+            } else {
+                postedEl.textContent = '';
+            }
+
+            const skillsEl = document.getElementById('jobSkills');
+            const skills = (job.skills || '').split(',').map(s => s.trim()).filter(Boolean);
+            skillsEl.innerHTML = skills.length === 0
+                ? '<span class="text-xs text-slate-400 italic">No specific skills listed.</span>'
+                : skills.map(s =>
+                    `<span class="text-xs font-medium px-2.5 py-1 bg-indigo-50 text-indigo-700 border border-indigo-100 rounded-full">${escapeHtml(s)}</span>`
+                ).join('');
+
+            document.getElementById('jobDescription').textContent = job.description || '(No description provided.)';
+
+            document.getElementById('loadingState').classList.add('hidden');
+            document.getElementById('jobLayout').classList.remove('hidden');
+            lucide.createIcons();
+        }
+
+        // ---- Apply form ----
+
+        const fileInput = document.getElementById('resumeInput');
+        document.getElementById('dropZone').addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                document.getElementById('fileNameDisplay').textContent = e.target.files[0].name;
+                document.getElementById('fileNameDisplay').classList.remove('hidden');
+            }
+        });
+
+        document.getElementById('applicationForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!selectedJob) return;
+
+            const name  = document.getElementById('candidateName').value.trim();
+            const email = document.getElementById('candidateEmail').value.trim();
+            const file  = fileInput.files[0];
+
+            if (!name)  { showModal("Please enter your full name."); return; }
+            if (!email) { showModal("Please enter your email address."); return; }
+            if (!file)  { showModal("Please upload your resume (PDF) before submitting."); return; }
+
+            showConfirmModal({
+                title: "Confirm Your Application",
+                details: [
+                    { label: "Applying For", value: selectedJob.title },
+                    { label: "Job ID",        value: String(selectedJob.id) },
+                    { label: "Name",          value: name },
+                    { label: "Email",         value: email },
+                    { label: "Resume",        value: file.name },
+                ],
+                confirmText: "Submit Application",
+                note: "Once submitted, the application cannot be modified.",
+                onConfirm: async () => {
+                    const btn = document.getElementById('submitBtn');
+                    btn.disabled = true;
+                    btn.innerHTML = "Processing…";
+
+                    try {
+                        const uploadResult = await Api.uploadResume(file);
+                        if (!uploadResult) { btn.disabled = false; btn.innerHTML = "Submit Application"; return; }
+
+                        await Api.submitApplication({
+                            request: { text: uploadResult.extracted_text },
+                            job_id: selectedJob.id,
+                            candidate_name: name,
+                            candidate_email: email,
+                            resume_url: uploadResult.file_url,
+                        });
+
+                        document.getElementById('applicationForm').classList.add('hidden');
+                        document.getElementById('successState').classList.remove('hidden');
+                        lucide.createIcons();
+                    } catch (err) {
+                        btn.disabled = false;
+                        btn.innerHTML = "Submit Application";
+                    }
+                },
+            });
+        });
+
+        loadJob();
+    </script>
+</body>
+
+</html>

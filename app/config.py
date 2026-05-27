@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     JOB_CHUNK_SIZE: int = 500
     JOB_CHUNK_OVERLAP: int = 50
 
+    # Phase 5.2 — top-K resume chunks sent to the rerank LLM. Phases 2 and 3
+    # retrieve the K best-matching resume chunks (plus chunk 0 always) by
+    # cosine distance to the query/job, instead of concatenating the full
+    # resume. See docs/ai-features/phase-5-llm-reranking.md follow-up 5.2.
+    RERANK_RESUME_CHUNK_TOP_K: int = 8
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 # Initialize settings

@@ -9,9 +9,7 @@
     <link rel="stylesheet" href="/static/css/styles.css">
     <script src="https://unpkg.com/lucide@latest"></script>
     <style>
-        body {
-            font-family: 'Inter', sans-serif;
-        }
+        body { font-family: 'Inter', sans-serif; }
     </style>
 </head>
 
@@ -29,86 +27,22 @@
                 Upload Resume. <span class="text-indigo-200">Get Hired.</span>
             </h1>
             <p class="text-lg text-indigo-100 max-w-2xl mx-auto mb-8">
-                Upload your resume, select a job, and let our AI Agent analyze your fit instantly.
+                Browse open roles, view full job details, and apply in seconds.
             </p>
         </div>
     </header>
 
-    <main class="max-w-7xl mx-auto px-6 py-12">
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-12">
+    <main class="max-w-5xl mx-auto px-6 py-12">
 
-            <div class="lg:col-span-2 space-y-6">
-                <h2 class="text-2xl font-bold flex items-center">
-                    <i data-lucide="briefcase" class="w-6 h-6 mr-2 text-indigo-600"></i>
-                    Open Positions
-                </h2>
-                <div id="publicJobs" class="space-y-4">
-                    <div class="p-8 text-center text-slate-400 bg-slate-50 rounded-lg">Loading jobs...</div>
-                </div>
-            </div>
+        <h2 class="text-2xl font-bold flex items-center mb-6">
+            <i data-lucide="briefcase" class="w-6 h-6 mr-2 text-indigo-600"></i>
+            Open Positions
+        </h2>
 
-            <div class="lg:col-span-1">
-                <div
-                    class="sticky top-8 bg-white border border-slate-200 rounded-xl shadow-xl p-6 relative overflow-hidden">
-                    <h3 class="text-xl font-bold mb-2 relative z-10">Apply Now</h3>
-                    <p class="text-sm text-slate-500 mb-6 relative z-10" id="applyHelpText">Select a job from the left
-                        to begin.</p>
-
-                    <div id="noJobSelected"
-                        class="text-center py-12 border-2 border-dashed border-slate-100 rounded-lg bg-slate-50">
-                        <i data-lucide="arrow-left" class="w-8 h-8 mx-auto text-slate-300 mb-2"></i>
-                        <p class="text-sm text-slate-400 font-medium">Please select a role</p>
-                    </div>
-
-                    <form id="applicationForm" class="hidden space-y-4">
-                        <div class="bg-indigo-50 border border-indigo-100 p-3 rounded-lg">
-                            <div class="text-[10px] uppercase font-bold text-indigo-600 tracking-wide">Applying For
-                            </div>
-                            <div id="selectedJobTitle" class="font-bold text-slate-800 text-sm">Senior Dev</div>
-                        </div>
-
-                        <div>
-                            <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Full Name</label>
-                            <input type="text" id="candidateName" required placeholder="John Doe"
-                                class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm">
-                        </div>
-
-                        <div>
-                            <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Email</label>
-                            <input type="email" id="candidateEmail" required placeholder="john@example.com"
-                                class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm">
-                        </div>
-
-                        <div class="mt-4">
-                            <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Resume (PDF)</label>
-                            <div id="dropZone"
-                                class="border-2 border-dashed border-slate-300 rounded-lg p-6 text-center hover:bg-slate-50 cursor-pointer">
-                                <i data-lucide="upload-cloud" class="w-8 h-8 text-slate-400 mx-auto mb-2"></i>
-                                <p class="text-xs text-slate-600">Click to upload PDF</p>
-                                <input type="file" id="resumeInput" class="hidden" accept=".pdf">
-                                <div id="fileNameDisplay" class="text-xs text-indigo-600 font-bold mt-2 hidden"></div>
-                            </div>
-                        </div>
-
-                        <button type="submit" id="submitBtn"
-                            class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-lg shadow-md transition mt-2">
-                            Submit Application
-                        </button>
-                    </form>
-
-                    <div id="successState" class="hidden text-center py-8">
-                        <div class="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                            <i data-lucide="check" class="w-8 h-8 text-green-600"></i>
-                        </div>
-                        <h4 class="text-lg font-bold text-slate-800">Application Sent!</h4>
-                        <p class="text-sm text-slate-500 mb-4">Our AI is analyzing your profile now.</p>
-                        <button onclick="location.reload()"
-                            class="text-indigo-600 text-sm font-medium hover:underline">Apply for another job</button>
-                    </div>
-
-                </div>
-            </div>
+        <div id="publicJobs" class="space-y-4">
+            <div class="p-8 text-center text-slate-400 bg-slate-50 rounded-lg">Loading jobs…</div>
         </div>
+
     </main>
 
     <footer class="border-t border-slate-100 mt-12 py-8 text-center text-slate-400 text-sm">
@@ -117,9 +51,10 @@
     <script src="/static/js/api.js"></script>
     <script>
         lucide.createIcons();
-        let selectedJob = null;
 
-        // 1. Fetch Jobs
+        // 1. Fetch and render the public jobs list. Each card is a link to the
+        //    per-job details page (/job/{id}) where the candidate can read the
+        //    full posting and submit an application.
         async function loadJobs() {
             try {
                 const jobs = await Api.getJobs();
@@ -128,90 +63,39 @@
                     container.innerHTML = `<div class="p-8 text-center border rounded-lg bg-slate-50">No open positions.</div>`;
                     return;
                 }
-                container.innerHTML = jobs.map(job => `
-                    <div onclick='selectJob(${JSON.stringify(job)})' 
-                         class="bg-white p-6 rounded-xl border border-slate-200 shadow-sm hover:shadow-md cursor-pointer mb-4">
-                        <h3 class="font-bold text-xl text-slate-800">${job.title}</h3>
-                        <p class="text-slate-500 text-sm">${job.location} • ${job.salary_range}</p>
-                    </div>
-                `).join('');
+                container.innerHTML = jobs.map(job => {
+                    const skills = (job.skills || '').split(',').map(s => s.trim()).filter(Boolean);
+                    const skillChips = skills.slice(0, 5).map(s =>
+                        `<span class="text-[11px] font-medium px-2 py-0.5 bg-indigo-50 text-indigo-700 border border-indigo-100 rounded-full">${escapeHtml(s)}</span>`
+                    ).join('');
+                    const moreSkills = skills.length > 5
+                        ? `<span class="text-[11px] text-slate-400 px-1">+${skills.length - 5} more</span>`
+                        : '';
+                    const descPreview = (job.description || '').slice(0, 180).trim();
+                    const descTail = (job.description || '').length > 180 ? '…' : '';
+                    const meta = [
+                        job.location ? escapeHtml(job.location) : null,
+                        job.salary_range ? escapeHtml(job.salary_range) : null,
+                    ].filter(Boolean).join(' &bull; ');
+
+                    return `
+                        <a href="/job/${job.id}" class="block bg-white p-5 rounded-xl border border-slate-200 shadow-sm hover:shadow-md hover:border-indigo-300 transition">
+                            <div class="flex justify-between items-start gap-3 mb-1">
+                                <h3 class="font-bold text-lg text-slate-800 leading-snug">${escapeHtml(job.title)}</h3>
+                                <span class="text-xs text-slate-400 whitespace-nowrap pt-1">Job ID: ${job.id}</span>
+                            </div>
+                            <p class="text-slate-500 text-xs mb-3">${meta || '&nbsp;'}</p>
+                            ${skills.length ? `<div class="flex flex-wrap gap-1.5 mb-3">${skillChips}${moreSkills}</div>` : ''}
+                            ${descPreview ? `<p class="text-sm text-slate-600 leading-relaxed line-clamp-3">${escapeHtml(descPreview)}${descTail}</p>` : ''}
+                            <div class="mt-3 text-xs font-medium text-indigo-600">
+                                View details & apply →
+                            </div>
+                        </a>
+                    `;
+                }).join('');
                 lucide.createIcons();
             } catch (e) { console.error(e); }
         }
-
-        // 2. Select Job
-        window.selectJob = (job) => {
-            selectedJob = job;
-            document.getElementById('noJobSelected').classList.add('hidden');
-            document.getElementById('applicationForm').classList.remove('hidden');
-            document.getElementById('selectedJobTitle').innerText = job.title;
-        };
-
-        // 3. File Picker
-        const dropZone = document.getElementById('dropZone');
-        const fileInput = document.getElementById('resumeInput');
-        dropZone.addEventListener('click', () => fileInput.click());
-        fileInput.addEventListener('change', (e) => {
-            if (e.target.files.length > 0) {
-                document.getElementById('fileNameDisplay').innerText = e.target.files[0].name;
-                document.getElementById('fileNameDisplay').classList.remove('hidden');
-            }
-        });
-
-        // 4. Submit
-        document.getElementById('applicationForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-
-            // A. Frontend validation
-            const name = document.getElementById('candidateName').value.trim();
-            const email = document.getElementById('candidateEmail').value.trim();
-            const file = fileInput.files[0];
-
-            if (!name)  { showModal("Please enter your full name."); return; }
-            if (!email) { showModal("Please enter your email address."); return; }
-            if (!file)  { showModal("Please upload your resume (PDF) before submitting."); return; }
-
-            // B. Confirm before uploading
-            showConfirmModal({
-                title: "Confirm Your Application",
-                details: [
-                    { label: "Applying For", value: selectedJob.title },
-                    { label: "Name",          value: name },
-                    { label: "Email",         value: email },
-                    { label: "Resume",        value: file.name },
-                ],
-                confirmText: "Submit Application",
-                note: "Application once submitted cannot be modified.",
-                onConfirm: async () => {
-                    const btn = document.getElementById('submitBtn');
-                    btn.disabled = true;
-                    btn.innerHTML = "Processing...";
-
-                    try {
-                        // C. Upload PDF (only after confirmation)
-                        const uploadResult = await Api.uploadResume(file);
-                        if (!uploadResult) { btn.disabled = false; btn.innerHTML = "Submit Application"; return; }
-
-                        // D. Submit application
-                        await Api.submitApplication({
-                            request: { text: uploadResult.extracted_text_preview },
-                            job_id: selectedJob.id,
-                            candidate_name: name,
-                            candidate_email: email,
-                            resume_url: uploadResult.file_url
-                        });
-
-                        // E. Success
-                        document.getElementById('applicationForm').classList.add('hidden');
-                        document.getElementById('successState').classList.remove('hidden');
-
-                    } catch (err) {
-                        btn.disabled = false;
-                        btn.innerHTML = "Submit Application";
-                    }
-                }
-            });
-        });
 
         loadJobs();
     </script>

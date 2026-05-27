@@ -3,9 +3,10 @@
 # ---------------------------------------------------------------------------
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import (
+    BaseModel,
     ConfigDict,
     EmailStr,
     field_validator,
@@ -254,9 +255,11 @@ class SearchResult(SQLModel):
     candidate_name: str
     candidate_email: str
     resume_url: str
+    job_id: int               # id of the parent job they originally applied to
     job_title: str            # parent job they originally applied to
     best_match_chunk: str     # the resume passage that matched the query
-    similarity: float         # 0.0–1.0 cosine similarity, higher is better
+    similarity: float         # 0.0–1.0 — LLM score if rerank ran (0.01–1.0), else cosine
+    critique: str | None = None  # LLM-generated reasoning when rerank succeeded
 
 
 class SearchResponse(SQLModel):
@@ -264,6 +267,9 @@ class SearchResponse(SQLModel):
     results: list[SearchResult]
     total_returned: int       # length of results — convenience for the frontend
     has_more: bool            # true if a full page was returned (more likely available)
+    # True if LLM rerank failed and we returned vector-only ranking. The
+    # dashboard can surface a small "AI rerank unavailable" notice.
+    degraded: bool = False
 
 
 class JobEmbedding(SQLModel, table=True):
@@ -321,6 +327,10 @@ class CrossJobMatch(SQLModel, table=True):
     )
 
     similarity: float
+    # LLM-generated reasoning explaining why this job is a match — populated
+    # by the Phase 5 rerank step. Null if rerank failed and we fell back to
+    # vector-only scoring.
+    critique: str | None = None
     created_at: datetime = Field(default_factory=datetime.now)
 
 
@@ -328,4 +338,55 @@ class CrossJobMatchResult(SQLModel):
     """Response shape for GET /applications/{id}/matches — one suggested alternative job."""
     matched_job_id: int
     job_title: str
+    similarity: float
+    critique: str | None = None
+
+
+class CrossApplicantResult(SQLModel):
+    """
+    Response shape for GET /jobs/{job_id}/cross-applicants — the inverse view of
+    CrossJobMatch. One row = a candidate who applied to a *different* job owned
+    by the same recruiter but is a strong fit for *this* job.
+    """
+    application_id: int
+    candidate_name: str
+    candidate_email: str
+    resume_url: str
+    original_job_id: int
+    original_job_title: str
+    similarity: float
+    critique: str | None = None
+
+
+# --- RAG Q&A SCHEMAS (Phase 4) ---
+#
+# Request body for POST /applications/{id}/chat. The response is a server-sent
+# event stream (not a Pydantic model) — see docs/ai-features/phase-4-rag-qa.md
+# for the SSE event schema.
+
+
+class ChatTurn(BaseModel):
+    """One turn in the multi-turn conversation history sent by the frontend."""
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class ChatRequest(BaseModel):
+    """
+    Request body for POST /applications/{id}/chat.
+
+    Conversation history is stored server-side in Redis, keyed by
+    `(user_id, application_id, session_id)`. The frontend only needs to send
+    a session_id; the backend loads the prior turns from Redis, runs the LLM,
+    and persists the new turn. A fresh `session_id` from the client starts
+    a new conversation. See app/chat_history.py.
+    """
+    question: str = Field(min_length=3, max_length=1000)
+    session_id: str = Field(min_length=8, max_length=64)
+
+
+class Citation(BaseModel):
+    """A resume chunk that supported the LLM's answer; returned as the citations SSE event."""
+    chunk_index: int
+    chunk_text: str
     similarity: float

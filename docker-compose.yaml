@@ -17,10 +17,27 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
-  # 2. The Redis Message Broker
+  # 2. The Redis Message Broker (also used for rate-limit counters,
+  # query-embedding cache, and chat history)
+  #
+  # --maxmemory               cap memory usage so Redis cannot starve the host
+  # --maxmemory-policy        volatile-lru: when memory is full, evict the
+  #                           least-recently-used keys that have a TTL. Keys
+  #                           without a TTL (Celery messages — MUST not be
+  #                           lost) are never touched.
+  # --appendonly yes          AOF persistence — chat history and other state
+  #                           survive container restarts.
   redis:
     image: redis:7-alpine
     restart: always
+    command:
+      - redis-server
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - volatile-lru
+      - --appendonly
+      - "yes"
     ports:
       - "6379:6379"
 

@@ -50,24 +50,55 @@ Plus **two manual override paths** for freshness:
 
 This combination keeps the default cost predictable while giving the recruiter explicit control when they want freshness. Background auto-refresh (e.g. via Celery Beat) is deliberately not added — the manual controls cover the use case without the operational complexity of a periodic job.
 
-### 3. Match score aggregation — Option C (top-3-chunk average)
+### 3. Match score aggregation — bidirectional top-3-chunk average with harmonic mean
 
-For each `(application, candidate_job)` pair:
+The algorithm went through one iteration. We started with a one-directional **resume → job** top-3-chunk average ("for each resume chunk, find its best matching job chunk, average the top three"). Testing surfaced a real flaw: adding more requirements to a job barely lowered the match score.
 
-1. For every resume chunk, find its best-matching chunk within the candidate job
-2. Take those similarity scores
-3. Keep the top 3, average them
+**Concrete failure case.** A Python/FastAPI resume scored 79% against a job requiring just Python and FastAPI. The recruiter edited the job to also require Java, Kafka, Docker, and Kubernetes — none of which the resume mentioned. After recheck, the score dropped to 78%. The added requirements had almost no effect on the score.
 
-This requires the candidate to have **at least three strong points of overlap** with the job, not just one fluke chunk. It also avoids the dilution caused by averaging across all chunks (which would penalise long, varied resumes).
+**Why this happens with one-directional aggregation.** The "best match per resume chunk" lookup is asymmetric. It measures *"are the candidate's strongest points represented somewhere in the job?"* — not *"are the job's requirements covered by the resume?"*. The Python and FastAPI resume chunks still align best to the Python and FastAPI job chunks (top-3 unchanged), and the new Java / Kafka / Docker / Kubernetes job chunks have no effect because nothing in the resume aligns to them. They simply don't get picked.
 
-### 4. Match threshold — 0.7 minimum
+**The bidirectional fix.** Compute coverage in both directions and combine them:
 
-Only matches with aggregate similarity ≥ 0.7 are stored and surfaced. Higher than search's 0.6 threshold because:
+| Direction | What it asks | How it's computed |
+|---|---|---|
+| **Resume → Job** (existing) | "What are the candidate's strongest points relative to this job?" | For each resume chunk, find best job chunk; average top 3 |
+| **Job → Resume** (added) | "Which of the job's requirements are best covered by the candidate?" | For each job chunk, find best resume chunk; average top 3 |
 
-- A cross-job suggestion is a stronger claim than a search hit ("this candidate fits another role you posted" vs "this candidate's resume mentions something relevant to your query")
-- Showing weak matches dilutes the signal and trains the recruiter to ignore the feature
+Combine the two with the **harmonic mean**:
 
-If no jobs clear 0.7, the candidate gets no match badge and no "Also a good fit for" section. Better silent than noisy.
+```
+final_score = 2 × resume_avg × job_avg / (resume_avg + job_avg)
+```
+
+Harmonic mean is the standard way to combine precision-and-recall-style metrics. Its key property: the result is dragged down by the lower of the two inputs. A resume that strongly matches some parts of the job but misses most of the job's requirements scores in the middle of the two values, not near the top.
+
+**Re-running the failure case under the new algorithm:**
+- Resume → Job: ~0.78 (unchanged — Python/FastAPI alignments still strong)
+- Job → Resume: ~0.45 (4 of 6 requirement areas — Java, Kafka, Docker, Kubernetes — have no good resume match)
+- Harmonic mean: **~0.57** — the right answer for "Python developer applying to a polyglot role"
+
+**Alternatives considered and rejected:**
+
+| Alternative | Why not |
+|---|---|
+| `MIN(resume_avg, job_avg)` instead of harmonic mean | More punishing but less smooth — small changes in either side cause abrupt jumps |
+| Pure job-side aggregation | Flips the bias the other way — over-penalises candidates with strong-but-narrow expertise |
+| Full pairwise average (every chunk × every chunk) | Floor of irrelevant pairs drags everything down; signal lost |
+| Smaller chunks (e.g. 200 chars) | Marginal; same asymmetric problem at finer granularity |
+| Larger chunks | More dilution — a chunk talking about "Python AND Java" would always match either kind of job |
+| Switch embedding models | Significant cost; doesn't fix the aggregation flaw |
+| Fine-tune embedding model on resume data | Impractical at this scale — requires labelled match data, evaluation framework, retraining infrastructure. Wrong tool for an aggregation problem |
+
+### 4. Match threshold — 0.55 minimum (calibrated for bidirectional scoring)
+
+The threshold was previously 0.7, calibrated against the old one-directional algorithm. Bidirectional scoring produces **lower absolute values** because the harmonic mean drags scores down when either side is weak. Most legitimate matches that scored 0.78–0.85 under the old algorithm score 0.55–0.70 under the new one.
+
+We dropped the threshold to **0.55** to keep the volume of suggested matches comparable while gaining the algorithm's accuracy. Below 0.55 the match feels weak in both directions and is unlikely to be useful to the recruiter.
+
+If no jobs clear 0.55, the candidate gets no match badge and no "Also a good fit for" section. Better silent than noisy.
+
+Both the threshold and the top-K window size are configurable via the `MATCH_MIN_SIMILARITY` and `MATCH_TOP_K_CHUNKS` constants in `app/worker.py`. Tune without migrations.
 
 ### 5. Top-N — 3 matches per candidate
 
@@ -107,7 +138,7 @@ New column on `Application`: `matching_error: str | None`. Populated by the `Mat
 
 ### 9. `match_jobs_task` retry policy — `max_retries=1`
 
-`match_jobs_task` is pure SQL — no external API calls. Failures are unlikely to be transient (most would be DB-related: deadlock, connection pool exhaustion, schema drift). A single retry catches transient DB issues without burning resources retrying real bugs.
+`match_jobs_task` is mostly SQL — the only external call is the per-candidate Gemini rerank added in [Phase 5](phase-5-llm-reranking.md). Rerank failures are handled inside `rerank_sequential` itself (per-call try/except with a `None` result), and on total-LLM-failure the task falls back to vector-only scoring rather than raising. So failures that reach Celery's retry layer are almost always DB-related: deadlock, connection pool exhaustion, schema drift. A single retry catches transient DB issues without burning resources retrying real bugs.
 
 ```python
 max_retries=1, retry_backoff=True
@@ -187,50 +218,90 @@ chain(
 
 ```sql
 WITH chunk_pairs AS (
-    -- Every resume chunk × every job chunk for OTHER jobs in the same recruiter's pool
+    -- All (resume_chunk × job_chunk) similarity scores, scoped to the
+    -- recruiter's own jobs and excluding the candidate's own application's job.
     SELECT
         je.job_id,
-        re.id AS resume_chunk_id,
+        je.id  AS job_chunk_id,
+        re.id  AS resume_chunk_id,
         1 - (re.embedding <=> je.embedding) AS pair_similarity
     FROM resumeembedding re
     JOIN application a   ON a.id = re.application_id
-    JOIN joblisting orig ON orig.id = a.job_id            -- the job they applied to
-    JOIN joblisting cand ON cand.owner_id = orig.owner_id -- same recruiter
-                        AND cand.id != orig.id            -- exclude their own job
+    JOIN joblisting orig ON orig.id = a.job_id             -- the job they applied to
+    JOIN joblisting cand ON cand.owner_id = orig.owner_id  -- same recruiter
+                        AND cand.id != orig.id             -- exclude their own job
     JOIN jobembedding je ON je.job_id = cand.id
     WHERE a.id = :application_id
 ),
-best_per_resume_chunk AS (
-    -- For each (resume chunk, candidate job), keep the best matching job chunk
+-- Direction 1 — Resume → Job:
+-- "Are the candidate's strongest points represented somewhere in the job?"
+resume_side_best AS (
     SELECT job_id, resume_chunk_id, MAX(pair_similarity) AS best_similarity
     FROM chunk_pairs
     GROUP BY job_id, resume_chunk_id
 ),
-ranked_chunks AS (
-    -- Within each job, rank resume chunks by how well they match
+resume_side_ranked AS (
     SELECT
         job_id,
         best_similarity,
         ROW_NUMBER() OVER (
-            PARTITION BY job_id
-            ORDER BY best_similarity DESC
+            PARTITION BY job_id ORDER BY best_similarity DESC
         ) AS chunk_rank
-    FROM best_per_resume_chunk
+    FROM resume_side_best
+),
+resume_coverage AS (
+    SELECT job_id, AVG(best_similarity) AS resume_avg
+    FROM resume_side_ranked
+    WHERE chunk_rank <= 3                       -- top-3
+    GROUP BY job_id
+),
+-- Direction 2 — Job → Resume:
+-- "Are the job's requirements covered by the candidate's resume?"
+job_side_best AS (
+    SELECT job_id, job_chunk_id, MAX(pair_similarity) AS best_similarity
+    FROM chunk_pairs
+    GROUP BY job_id, job_chunk_id
+),
+job_side_ranked AS (
+    SELECT
+        job_id,
+        best_similarity,
+        ROW_NUMBER() OVER (
+            PARTITION BY job_id ORDER BY best_similarity DESC
+        ) AS chunk_rank
+    FROM job_side_best
+),
+job_coverage AS (
+    SELECT job_id, AVG(best_similarity) AS job_avg
+    FROM job_side_ranked
+    WHERE chunk_rank <= 3                       -- top-3
+    GROUP BY job_id
+),
+-- Harmonic mean of the two coverages. Dragged down by the lower value, so a
+-- job with many uncovered requirements (low job_avg) scores far lower than
+-- a one-directional simple average would suggest.
+combined AS (
+    SELECT
+        r.job_id,
+        r.resume_avg,
+        j.job_avg,
+        CASE
+            WHEN (r.resume_avg + j.job_avg) = 0 THEN 0
+            ELSE (2 * r.resume_avg * j.job_avg) / (r.resume_avg + j.job_avg)
+        END AS aggregate_similarity
+    FROM resume_coverage r
+    JOIN job_coverage j ON r.job_id = j.job_id
 )
-SELECT
-    job_id,
-    AVG(best_similarity) AS aggregate_similarity
-FROM ranked_chunks
-WHERE chunk_rank <= 3                    -- top-3 average (Option C)
-GROUP BY job_id
-HAVING AVG(best_similarity) >= 0.7       -- threshold
+SELECT job_id, aggregate_similarity
+FROM combined
+WHERE aggregate_similarity >= 0.55             -- threshold
 ORDER BY aggregate_similarity DESC
-LIMIT 3;                                 -- top-3 matches
+LIMIT 3;                                       -- top-3 matches
 ```
 
 ### Walking through the query, piece by piece
 
-The query has four logical stages, three of them inside CTEs and one as the final outer `SELECT`. Each stage transforms the previous one. The structure mirrors the conceptual question: *for each candidate job in the recruiter's pool, how strongly does this candidate's resume align with that job, when we look only at the candidate's most relevant points of overlap?*
+The query has eight logical stages, seven of them inside CTEs and one as the final outer `SELECT`. The structure mirrors the conceptual question: *for each candidate job in the recruiter's pool, how strongly does this candidate's resume cover the job AND how strongly does the job's requirements appear in the resume?* The harmonic mean of the two answers is the final match score.
 
 #### Stage 1 — `chunk_pairs` CTE: the raw resume-chunk × job-chunk similarity grid
 
@@ -238,7 +309,8 @@ The query has four logical stages, three of them inside CTEs and one as the fina
 WITH chunk_pairs AS (
     SELECT
         je.job_id,
-        re.id AS resume_chunk_id,
+        je.id  AS job_chunk_id,
+        re.id  AS resume_chunk_id,
         1 - (re.embedding <=> je.embedding) AS pair_similarity
     FROM resumeembedding re
     JOIN application a   ON a.id = re.application_id
@@ -265,88 +337,137 @@ This stage produces the cartesian product of `(resume chunks of this application
 
 **Where the HNSW indexes activate** — the `re.embedding <=> je.embedding` operation references two indexed vector columns. Postgres uses both HNSW indexes to skip full-table scans, which is essential for performance at scale.
 
-#### Stage 2 — `best_per_resume_chunk` CTE: collapse to "best alignment per (resume chunk, candidate job)"
+#### Stage 2 — `resume_side_best` CTE: best job-chunk per (job, resume chunk)
 
 ```sql
-best_per_resume_chunk AS (
+resume_side_best AS (
     SELECT job_id, resume_chunk_id, MAX(pair_similarity) AS best_similarity
     FROM chunk_pairs
     GROUP BY job_id, resume_chunk_id
 )
 ```
 
-The previous stage produced multiple rows per `(candidate job, resume chunk)` pair — one for each chunk of that candidate job. This stage collapses them, keeping only the highest similarity.
+For each `(candidate job, resume chunk)` pair, keep the single best matching job chunk. The other job chunks for that pair are dropped — we only care about the strongest alignment.
 
-**Why this matters semantically** — a resume chunk that mentions *"led a team of 8 engineers"* might align strongly with a job chunk about *"team leadership"* and only weakly with a job chunk about *"AWS infrastructure"*. We only care about the strongest signal — that resume chunk *does* express leadership, regardless of whether other job chunks happened to be irrelevant. Taking `MAX` over the job chunks captures this correctly.
+**Why this matters semantically** — a resume chunk that mentions *"led a team of 8 engineers"* might align strongly with a job chunk about *"team leadership"* and only weakly with a job chunk about *"AWS infrastructure"*. We care about the strongest signal: the resume chunk *does* express leadership, regardless of whether other job chunks happened to be irrelevant. `MAX` over the job chunks captures this.
 
-**Concrete shape** — the 100 rows from Stage 1 become `10 × 2 = 20` rows: one row per resume chunk per candidate job, each carrying the "best part of that job this resume chunk matches".
+**Concrete shape** — for a 10-chunk resume and 2 candidate jobs with 5 chunks each, the 100 rows from Stage 1 collapse to `10 × 2 = 20` rows.
 
-#### Stage 3 — `ranked_chunks` CTE: rank resume chunks within each candidate job
+#### Stage 3 — `resume_side_ranked` CTE: rank resume chunks within each candidate job
 
 ```sql
-ranked_chunks AS (
+resume_side_ranked AS (
     SELECT
         job_id,
         best_similarity,
         ROW_NUMBER() OVER (
-            PARTITION BY job_id
-            ORDER BY best_similarity DESC
+            PARTITION BY job_id ORDER BY best_similarity DESC
         ) AS chunk_rank
-    FROM best_per_resume_chunk
+    FROM resume_side_best
 )
 ```
 
-`ROW_NUMBER()` is a **window function** — it computes a value per row without collapsing the result set. Here it ranks the resume chunks against each candidate job:
+`ROW_NUMBER()` is a **window function** that ranks rows without collapsing the result set:
+- **`PARTITION BY job_id`** — fresh ranking per candidate job.
+- **`ORDER BY best_similarity DESC`** — rank 1 = resume chunk that aligned most strongly with that job.
 
-- **`PARTITION BY job_id`** — start a fresh ranking for each candidate job (so resume chunk rankings for job A don't interfere with job B).
-- **`ORDER BY best_similarity DESC`** — rank 1 goes to the resume chunk that aligned most strongly with that job, rank 2 to the next strongest, and so on.
+The 20 rows stay 20 rows; a `chunk_rank` column is added. We need this ranking so the next stage can keep only the top K.
 
-**Concrete shape** — the 20 rows stay 20 rows; we've just added a `chunk_rank` column. For each candidate job, ranks run `1, 2, 3, ..., 10` (one rank per resume chunk).
-
-**Why we need this ranking** — the final aggregation only averages the top-K resume chunks per candidate job. Without ranking we'd average all chunks, which dilutes the score with chunks that are weakly relevant to that particular job.
-
-#### Stage 4 — outer `SELECT`: top-K average per candidate job, threshold, and final ordering
+#### Stage 4 — `resume_coverage` CTE: top-K average for the Resume → Job direction
 
 ```sql
-SELECT
-    job_id,
-    AVG(best_similarity) AS aggregate_similarity
-FROM ranked_chunks
-WHERE chunk_rank <= :top_k
-GROUP BY job_id
-HAVING AVG(best_similarity) >= :min_similarity
-ORDER BY aggregate_similarity DESC
-LIMIT :top_n
+resume_coverage AS (
+    SELECT job_id, AVG(best_similarity) AS resume_avg
+    FROM resume_side_ranked
+    WHERE chunk_rank <= 3
+    GROUP BY job_id
+)
 ```
 
-This is where the final score is computed and the result is shaped.
+For each candidate job, average the top 3 resume chunks' best alignments. This produces the **Resume → Job** coverage score: *"How well do the candidate's strongest points show up in this job?"*
 
-- **`WHERE chunk_rank <= :top_k`** — keep only the top K resume chunks (K=3) per candidate job. The other 7 resume chunks per job are dropped — they didn't make the cut for what this candidate offers to *this* role.
-- **`GROUP BY job_id`** — one row per candidate job.
-- **`AVG(best_similarity)`** — average the top-K similarities. This is the aggregate match score for that candidate job. Because the top-K are by definition the highest, the average is a fair representation of "how strong are the candidate's best signals for this job".
-- **`HAVING AVG(...) >= :min_similarity`** — threshold filter (0.7). Jobs whose top-3-chunk average doesn't clear this are dropped.
-- **`ORDER BY aggregate_similarity DESC LIMIT :top_n`** — sort by score and keep the top N (3) jobs.
+If the candidate has 3 strong areas of overlap with the job, `resume_avg` is high. If most of the resume isn't relevant, the top 3 are still the best 3 so this metric can stay high — which is exactly why we need the second direction.
 
-**Concrete shape** — at most 3 rows, each `(job_id, aggregate_similarity)`. The application layer joins these against `joblisting` to get the human-readable job title before returning to the frontend.
+#### Stages 5–7 — Job → Resume direction (mirror of Stages 2–4)
 
-### Why this aggregation strategy (top-K-of-best-per-chunk average)?
+```sql
+job_side_best AS (
+    SELECT job_id, job_chunk_id, MAX(pair_similarity) AS best_similarity
+    FROM chunk_pairs
+    GROUP BY job_id, job_chunk_id
+),
+job_side_ranked AS (
+    SELECT
+        job_id,
+        best_similarity,
+        ROW_NUMBER() OVER (
+            PARTITION BY job_id ORDER BY best_similarity DESC
+        ) AS chunk_rank
+    FROM job_side_best
+),
+job_coverage AS (
+    SELECT job_id, AVG(best_similarity) AS job_avg
+    FROM job_side_ranked
+    WHERE chunk_rank <= 3
+    GROUP BY job_id
+)
+```
 
-There are several ways to roll up many chunk-pair similarities into a single match score. The chosen approach has specific properties:
+Same shape as Stages 2–4, but partitioned on **`job_chunk_id`** instead of `resume_chunk_id`. For each `(candidate job, job chunk)`, find the best matching resume chunk; rank job chunks within each candidate job; average the top 3.
 
-| Strategy | Pro | Con |
-|---|---|---|
-| Average over **all** chunk pairs | Smooth, easy to explain | Long, varied resumes with one strong section get diluted by irrelevant sections |
-| Single `MAX` over all pairs | Picks up one strong signal | One fluke alignment dominates — false positives |
-| **Top-K of best-per-resume-chunk, then average (chosen)** | Requires K distinct strong points of overlap; balanced against noise | Slightly more complex SQL |
+This produces the **Job → Resume** coverage score: *"How well are this job's requirements covered by the resume?"*
 
-The top-K approach essentially asks: *"Does this resume have at least three different points of overlap with this job, all of them strong?"* That's a much more defensible signal of fit than either a single strong match or a smeared average.
+If the job lists 10 distinct requirements and only 2 are in the resume, the top 3 are: the 2 covered ones (high similarity) + the next best (probably low). The average lands in the middle.
+
+#### Stage 8 — `combined` CTE: harmonic mean of the two coverages
+
+```sql
+combined AS (
+    SELECT
+        r.job_id,
+        r.resume_avg,
+        j.job_avg,
+        CASE
+            WHEN (r.resume_avg + j.job_avg) = 0 THEN 0
+            ELSE (2 * r.resume_avg * j.job_avg) / (r.resume_avg + j.job_avg)
+        END AS aggregate_similarity
+    FROM resume_coverage r
+    JOIN job_coverage j ON r.job_id = j.job_id
+)
+```
+
+For each candidate job, combine the two directional scores via harmonic mean:
+
+```
+final_score = 2 × resume_avg × job_avg / (resume_avg + job_avg)
+```
+
+**Why harmonic mean** — the harmonic mean is dragged down toward the lower input. If `resume_avg = 0.85` but `job_avg = 0.40` (the candidate has some strong points but the job has many uncovered requirements), the harmonic mean is `~0.54` — much closer to the lower value than the arithmetic mean (`0.625`) would suggest. This is the desired behaviour: a strong-on-one-side / weak-on-the-other match should not look like a balanced one.
+
+The `CASE WHEN ... = 0` guard avoids division by zero in the degenerate case where both averages are zero.
+
+#### Final `SELECT` — threshold, ordering, top-N
+
+```sql
+SELECT job_id, aggregate_similarity
+FROM combined
+WHERE aggregate_similarity >= 0.55
+ORDER BY aggregate_similarity DESC
+LIMIT 3
+```
+
+- **`WHERE aggregate_similarity >= 0.55`** — threshold filter. Calibrated for the harmonic mean's lower absolute range (see decision 4 above).
+- **`ORDER BY ... DESC`** — best matches first.
+- **`LIMIT 3`** — at most 3 alternative-job suggestions per candidate.
+
+**Concrete shape** — at most 3 rows, each `(job_id, aggregate_similarity)`. The application layer joins these against `joblisting` for the human-readable title.
 
 ### Why the joins happen inside the CTE, not at the end
 
 The owner-scope filter (`cand.owner_id = orig.owner_id`) and the self-exclusion (`cand.id != orig.id`) live in Stage 1, before any aggregation or window function runs. Three reasons:
 
 1. **Multi-tenancy enforced at the database layer.** Even if a future bug let a request reach this query with the wrong application ID, the joins still exclude jobs that don't belong to the same recruiter. The data simply cannot be returned.
-2. **Smaller working set for the window function.** Stage 3's `ROW_NUMBER` is the most computationally interesting step. By filtering down to the relevant recruiter and excluding the self-job before that point, we keep the partitions small.
+2. **Smaller working set for the window functions.** Stages 3 and 6 (the `ROW_NUMBER` calls — one per direction) are the most computationally interesting steps. Filtering down to the relevant recruiter and excluding the self-job before that point keeps the partitions small.
 3. **Composability with HNSW.** The HNSW indexes are most effective when Postgres can push the cosine-distance computation against a pre-filtered candidate set rather than computing similarities and then filtering.
 
 ### Indexes that make this query fast
@@ -364,12 +485,12 @@ For one application against a recruiter pool of 50 jobs (~250 job chunks total) 
 
 | Step | Approx. cost |
 |---|---|
-| Stage 1 cartesian product | ~2,500 chunk-pair similarity computations, accelerated by HNSW; sub-100ms in practice |
-| Stage 2 group + MAX | ~500 row scans, in-memory; negligible |
-| Stage 3 window function | ~500 row scans; negligible |
-| Stage 4 GROUP BY + ORDER BY | ~50 group rows; negligible |
+| Stage 1 — cartesian product | ~2,500 chunk-pair similarity computations, accelerated by HNSW; sub-100ms in practice |
+| Stages 2–4 — Resume → Job direction | ~500 row scans + window function + GROUP BY; negligible |
+| Stages 5–7 — Job → Resume direction (mirror) | ~250 row scans + window function + GROUP BY; negligible |
+| Stage 8 — `combined` join + harmonic mean | ~50 group rows; constant-time arithmetic; negligible |
 
-End-to-end runtime is dominated by Stage 1 (the vector math). The whole query typically completes in tens of milliseconds — well under the threshold where it would be worth caching results.
+End-to-end runtime is dominated by Stage 1 (the vector math). The bidirectional pass adds one more GROUP BY + ROW_NUMBER over the same `chunk_pairs` CTE, which is cheap because the CTE is materialised once and re-used. The whole query typically completes in tens of milliseconds — well under the threshold where it would be worth caching results.
 
 ### Multi-tenancy guarantee — restated
 
@@ -441,14 +562,15 @@ Plus the `matching_error: str | None` column on `Application`.
 
 ## Scalability notes
 
-Cost characteristics of the matching pipeline:
+Cost characteristics of the matching pipeline. This section reflects the post-[Phase 5](phase-5-llm-reranking.md) and post-[Phase 5.2](phase-5-llm-reranking.md#follow-up-52--top-k-resume-chunks-to-rerank-not-full-resume) state — the original Phase 3 design had no LLM in the hot path; that changed with Phase 5's rerank stage.
 
-- **No Gemini calls in matching itself** — `match_jobs_task` is pure pgvector + SQL. Fast and free per invocation.
-- **Match compute** is O(R × J × C) where R = resume chunks (~10), J = jobs in the recruiter's pool (typically tens), C = job chunks (~5). Hundreds of jobs still complete well under one second per application.
+- **Stage 1 — vector pre-filter** is pure pgvector + SQL. O(R × J × C) where R = resume chunks (~10), J = jobs in the recruiter's pool (typically tens), C = job chunks (~5). Hundreds of jobs still complete well under one second per application. Free.
+- **Stage 2 — LLM rerank** (Phase 5) sends one Gemini call per pre-filter survivor, capped at `MATCH_PREFILTER_TOP_K = 10` per task. Sequential, ~1–2 s each → ~10–20 s tail per `match_jobs_task` invocation. Cached in Redis with 1 h TTL keyed by `(application_id, query_text, candidate_text)`, so unchanged-input re-runs hit cache.
+- **Resume input per LLM call** (Phase 5.2) is the top-`RERANK_RESUME_CHUNK_TOP_K` resume chunks ranked by best cosine distance to *any* chunk of the candidate job, plus chunk 0 (header). ~5 KB per call instead of the full ~6 KB resume. Each call's resume slice is computed in <10 ms via a cross-join SQL query before the LLM call fires.
 - **`embed_job_task`** is one small batched Gemini call per job. Free tier handles this comfortably.
-- **Bulk recheck cost** scales linearly with applicant count — N applications produces N queued tasks. Worker pool drains in batches; total wall time depends on Celery concurrency. The `2/hour` rate limit prevents runaway dispatch.
+- **Bulk recheck cost** scales linearly with applicant count: N applications produces N queued tasks, each running ~10 LLM rerank calls → up to 10 × N LLM calls total. Rate limit is now `1/hour` (Phase 5; tightened from the original `2/hour`) and the rerank cache absorbs the steady-state cost on re-runs. Worker pool drains in batches; total wall time depends on Celery concurrency.
 
-No new infrastructure. Uses the existing Celery worker pool and pgvector indexes from Phase 0.
+No new infrastructure. Uses the existing Celery worker pool and pgvector indexes from Phase 0, plus the Redis instance already used for rate-limit counters and chat history.
 
 ---
 
@@ -532,3 +654,158 @@ If the multi-tenancy assertion ever fails, that is a security regression — inv
 ## Status
 
 Design approved. Implementation complete. Smoke test ready to run.
+
+---
+
+## Update 3.1 — Inverse view: "Good matches from other job applications"
+
+### Problem
+
+The Phase 3 dashboard shows cross-job matches from the **candidate's perspective**: open Alice's analysis modal, see *"Also a strong match for: Tech Lead (89%), Backend Engineer (74%)"*. This is useful, but it hides matches from the recruiter when they are looking at a single job's applicants:
+
+- Recruiter has Job A (Frontend) and Job B (Tech Lead) open.
+- Alice applied to Job A. Phase 3 correctly identifies her as a better fit for Job B.
+- Recruiter opens Job B's applicants list looking for Tech Leads. Alice is **not** there — she only appears under Job A unless the recruiter happens to click her modal.
+
+The fix is to surface the inverse direction of the same data. Same `cross_job_match` rows, queried by `matched_job_id` instead of `application_id`.
+
+### Decisions
+
+**1. New section on the applicants view of every job.**
+
+Below the regular applicants list for Job B, add a new section: *"Good matches from your other job applications"*. Lists candidates who applied elsewhere but match Job B above the threshold, with:
+
+- Candidate name + email
+- The job they actually applied to (clickable — opens that job's applicants list)
+- LLM match score against Job B
+- LLM critique
+- A "View resume" link
+
+Recruiter can route a strong cross-match to the right pipeline without opening every candidate modal.
+
+**2. Keep the existing per-candidate view too.**
+
+The candidate detail modal still shows *"Also a strong match for…"* in the candidate's direction. Both directions are useful — they answer different questions ("where else could this candidate go?" vs "who else might fit this role?") — and they read from the exact same table. No data duplication, no extra LLM cost.
+
+**3. Show the candidate's original job in the inverse section.**
+
+Without it, the recruiter sees a name with no context. With it, they can see *"Alice — currently in your Frontend pipeline"* and decide whether to invite her to interview for Tech Lead as well, or move her over entirely. The original job title also disambiguates candidates who exist in multiple pipelines.
+
+**4. New endpoint, not an extension of an existing one.**
+
+The applicants list endpoint already returns applications *for this job*. Inverse matches are applications *for other jobs*. Mixing them into one response would make the schema confusing (every row would need a *"this is actually for another job"* flag). A separate endpoint keeps both schemas clean.
+
+**5. Multi-tenancy check on the matched job, not the originating job.**
+
+Cross-job matches are only computed within a recruiter's own pool (enforced by the `cand.owner_id = orig.owner_id` clause in `CROSS_JOB_MATCH_SQL`). So if the matched job belongs to the current recruiter, the originating job necessarily does too. The endpoint only needs to verify ownership of `job_id` in the path; no extra join needed.
+
+**6. Reuse the existing `MATCH_LLM_MIN_SCORE` threshold.**
+
+If a cross-job match made it into the `cross_job_match` table, it already cleared the threshold during Phase 3 scoring. The inverse endpoint returns whatever's in the table — no additional filtering needed.
+
+### Data flow
+
+```
+                  ┌────────────────────────────────────────────────────┐
+                  │  cross_job_match table (already populated by       │
+                  │  match_jobs_task in Phase 3 / Phase 5)             │
+                  │                                                    │
+                  │  application_id │ matched_job_id │ similarity │ critique │
+                  └─────┬───────────────────────┬──────────────────────┘
+                        │                       │
+            ┌───────────▼────────┐   ┌──────────▼───────────────────────┐
+            │ Existing direction │   │ NEW inverse direction            │
+            │ GET /applications/ │   │ GET /jobs/{job_id}/              │
+            │   {id}/matches     │   │   cross-applicants               │
+            │                    │   │                                  │
+            │ "where else could  │   │ "who else might fit this role?"  │
+            │  this candidate    │   │                                  │
+            │  go?"              │   │ rendered as bottom section of    │
+            │                    │   │ the Job's applicants view        │
+            └────────────────────┘   └──────────────────────────────────┘
+```
+
+### API design
+
+`GET /jobs/{job_id}/cross-applicants`
+
+**Auth**: requires `current_user` to own the job. Returns 403 otherwise.
+
+**Response** (`list[CrossApplicantResult]`):
+
+```python
+class CrossApplicantResult(SQLModel):
+    application_id: int
+    candidate_name: str
+    candidate_email: str
+    resume_url: str
+    original_job_id: int            # the job they actually applied to
+    original_job_title: str
+    similarity: float               # 0.0–1.0; same scale as cross_job_match.similarity
+    critique: str | None
+```
+
+**Query** (single statement, no Python-side joins):
+
+```sql
+SELECT
+    a.id            AS application_id,
+    a.candidate_name,
+    a.candidate_email,
+    a.resume_url,
+    orig.id         AS original_job_id,
+    orig.title      AS original_job_title,
+    m.similarity,
+    m.critique
+FROM crossjobmatch m
+JOIN application a    ON a.id = m.application_id
+JOIN joblisting orig  ON orig.id = a.job_id
+WHERE m.matched_job_id = :job_id
+ORDER BY m.similarity DESC
+LIMIT 20
+```
+
+Ordering by descending similarity puts the strongest cross-matches first. `LIMIT 20` is a safety cap — in practice each job will have a handful of cross-matches at most.
+
+### Dashboard rendering
+
+Below the existing applicants table on a job's view, a new collapsible section:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  Good matches from your other job applications                      │
+│  ─────────────────────────────────────────────────────────────────  │
+│  Alice Chen — applied to Senior Frontend Engineer                   │
+│    Match: 87%  ▸ Strong overlap on distributed systems, mentorship  │
+│    [View resume]  [Open original application]                       │
+│                                                                     │
+│  Jordan Park — applied to Junior Engineer                           │
+│    Match: 72%  ▸ Has the required Kafka and Postgres experience…    │
+│    [View resume]  [Open original application]                       │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Empty state: section hidden entirely if the endpoint returns `[]`. No "no cross-matches" message — it would just be noise on the most common case.
+
+### Implementation plan
+
+1. **app/models.py** — add `CrossApplicantResult` schema (no DB table; pure Pydantic).
+2. **app/main.py** — add `GET /jobs/{job_id}/cross-applicants` endpoint. Verify ownership of `job_id` against `current_user.id`. Execute the SQL above. Map rows to `CrossApplicantResult`. Apply the same `/jobs` rate-limit family as the existing job endpoints (no new limiter category).
+3. **app/static/js/api.js** — add `fetchCrossApplicants(jobId)` helper.
+4. **app/static/dashboard.html** (current single-page UI) — when an applicants table is rendered for a job, also fire `fetchCrossApplicants` in parallel and render the new section below. Hide the section if the response is empty. (Once Frontend Multi-Page lands — see [`docs/frontend-multipage.md`](../frontend-multipage.md) — this moves to the per-job page instead.)
+5. **scripts/smoke_test_phase3.py** — extend with one new assertion: after `match_jobs_task` runs for Alice (who applied to Frontend), `GET /jobs/{tech_lead_id}/cross-applicants` returns Alice with `original_job_id = frontend_id` and a non-empty critique. Multi-tenancy check: same query as recruiter B returns either 403 (job not owned) or `[]`.
+6. **docs/ai-features/phase-3-cross-job-matching.md** — flip this section's status from "designed" to "complete" when shipped.
+
+### Estimated effort
+
+~2 hours including the smoke test extension and dashboard integration. Mostly mechanical — no new ML, no new schema.
+
+### Status
+
+Complete. Shipped in:
+
+- `app/models.py` — `CrossApplicantResult` Pydantic schema.
+- `app/main.py` — `GET /jobs/{job_id}/cross-applicants` endpoint (60/min, ownership-checked).
+- `app/static/js/api.js` — `Api.getCrossApplicants(jobId)` helper.
+- `app/static/dashboard.html` — new `#crossApplicantsSection` rendered under the applicants table; auto-hides when empty; seeds `applicationMap` so the candidate modal opens correctly across jobs; links the candidate's *original* job title back to that job's applicants view.
+- `scripts/smoke_test_phase3.py` — new assertions that the inverse SQL returns Alice for the Tech Lead job with the correct `original_job_id` / `original_job_title`, and that recruiter B's job sees no cross-applicants from recruiter A's pool.

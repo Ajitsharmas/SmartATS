@@ -4,7 +4,7 @@ Phase 2 smoke test.
 Validates the semantic search pipeline end-to-end:
 
   1. A real resume embedded via the Phase 1 pipeline is retrievable by a
-     semantically related query (similarity above the 0.6 threshold).
+     semantically related query (similarity above the 0.7 threshold).
   2. A junk / unrelated query returns no results (threshold filters noise).
   3. Multi-tenancy: recruiter A's search cannot return recruiter B's candidates,
      even when both have applications matching the same query.
