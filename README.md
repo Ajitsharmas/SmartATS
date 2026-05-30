@@ -6,54 +6,49 @@ An AI-powered Applicant Tracking System built with FastAPI, Celery, and Google G
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     Browser  (Recruiter / Candidate)                    │
-└─────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph internet["Internet"]
+        Candidate["Candidate Browser"]
+        Recruiter["Recruiter Browser"]
+    end
 
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           GCP  e2-micro  VM                             │
-│  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │                         Docker  Compose                           │  │
-│  │                                                                   │  │
-│  │  ┌─────────────────────────────────────────────────────────────┐  │  │
-│  │  │                           Nginx                             │  │  │
-│  │  │                       Port  80 / 443                        │  │  │
-│  │  │         Reverse Proxy · SSL Termination · Rate Limiting     │  │  │
-│  │  └─────────────────────────────────────────────────────────────┘  │  │
-│  │                                                                   │  │
-│  │  ┌──────────────────────────────┐  ┌──────────────────────────┐  │  │
-│  │  │           FastAPI            │  │      Celery  Worker      │  │  │
-│  │  │          Port  8000          │  │                          │  │  │
-│  │  │   REST API · Auth            │  │   AI  Scoring            │  │  │
-│  │  │   File  Handling             │  │   Email  Dispatch        │  │  │
-│  │  └──────────────────────────────┘  └──────────────────────────┘  │  │
-│  │                                                                   │  │
-│  │  ┌─────────────────────────────────────────────────────────────┐  │  │
-│  │  │                           Redis                             │  │  │
-│  │  │                          Port  6379                         │  │  │
-│  │  │           Task  Message  Broker · Rate  Limit  Store        │  │  │
-│  │  └─────────────────────────────────────────────────────────────┘  │  │
-│  │                                                                   │  │
-│  │  ┌──────────────────────────────┐  ┌──────────────────────────┐  │  │
-│  │  │         PostgreSQL           │  │          MinIO           │  │  │
-│  │  │          Port  5432          │  │    Port  9000 / 9001     │  │  │
-│  │  │   Jobs · Users               │  │   Resume  PDF  Storage   │  │  │
-│  │  │   Applications               │  │                          │  │  │
-│  │  └──────────────────────────────┘  └──────────────────────────┘  │  │
-│  │                                                                   │  │
-│  │  ┌─────────────────────────────────────────────────────────────┐  │  │
-│  │  │                          Certbot                            │  │  │
-│  │  │                        SSL  Renewal                         │  │  │
-│  │  └─────────────────────────────────────────────────────────────┘  │  │
-│  └───────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
+    subgraph vm["GCP Compute Engine VM (e2-micro)"]
+        Nginx["Nginx<br/>(TLS termination,<br/>connection + req rate limits,<br/>reverse proxy)"]
 
-┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐
-│    Google  Gemini   │  │       Resend         │  │   Let's  Encrypt    │
-│    AI  Scoring  API │  │  Transactional Email │  │  Certificate  CA    │
-└─────────────────────┘  └─────────────────────┘  └─────────────────────┘
+        subgraph compose["Docker Compose Network"]
+            API["FastAPI / uvicorn"]
+            Worker["Celery Worker"]
+            DB[("Postgres + pgvector")]
+            Redis[("Redis<br/>broker · cache ·<br/>rate-limit counters")]
+            Storage[("MinIO<br/>S3-compatible<br/>resume PDF storage")]
+        end
+    end
+
+    subgraph external["External Services"]
+        Gemini["Gemini API<br/>(LLM + embeddings)"]
+        Resend["Resend<br/>(transactional email)"]
+        LE["Let's Encrypt<br/>(certbot ACME)"]
+    end
+
+    Candidate -->|HTTPS| Nginx
+    Recruiter -->|HTTPS| Nginx
+    Nginx --> API
+    API <--> DB
+    API <--> Redis
+    API <--> Storage
+    API -->|model calls| Gemini
+    API -->|send transactional| Resend
+    API -->|enqueue task| Redis
+    Worker -->|dequeue task| Redis
+    Worker <--> DB
+    Worker <--> Storage
+    Worker -->|embeddings + LLM| Gemini
+    Worker -->|outreach send| Resend
+    Nginx -.->|cert renewal| LE
 ```
+
+> For full system design, ERD, sequence diagrams covering every major flow (resume upload, semantic search, RAG chat, agent turn, outreach draft + send), deployment topology, security boundaries, and scaling ladder, see [**docs/architecture.md**](docs/architecture.md).
 
 ---
 
@@ -61,6 +56,7 @@ An AI-powered Applicant Tracking System built with FastAPI, Celery, and Google G
 
 | Topic | Description |
 |---|---|
+| [**Architecture**](docs/architecture.md) | System design, data model ERD, sequence diagrams for every major flow (resume submit, semantic search, RAG chat, agent turn, outreach), deployment topology, security boundaries, scaling ladder |
 | [Security — Threat Model](docs/security.md) | Honest catalogue of attack surface, prompt-injection mitigations (tag-isolation, output filtering, recruiter approval), auth + secret hardening, residual risks, incident-response runbook |
 | [Rate Limiting](docs/rate-limiting.md) | SlowAPI + Redis rate limits on all endpoints, dual user+IP limiting for the AI health probe, race condition safety, fixed window behaviour |
 | [DDoS Resistance](docs/ddos-resistance.md) | Nginx connection limits, request rate zones, how Nginx matches zones to URL paths, known gaps |
