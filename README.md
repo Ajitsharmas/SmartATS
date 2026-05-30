@@ -14,9 +14,9 @@ flowchart TB
     end
 
     subgraph vm["GCP Compute Engine VM (e2-micro)"]
-        Nginx["Nginx<br/>(TLS termination,<br/>connection + req rate limits,<br/>reverse proxy)"]
-
         subgraph compose["Docker Compose Network"]
+            Nginx["Nginx container<br/>:80 + :443<br/>TLS termination ·<br/>connection + req rate limits ·<br/>reverse proxy"]
+            Certbot["Certbot container<br/>(ACME cert renewal)"]
             API["FastAPI / uvicorn"]
             Worker["Celery Worker"]
             DB[("Postgres + pgvector")]
@@ -28,7 +28,7 @@ flowchart TB
     subgraph external["External Services"]
         Gemini["Gemini API<br/>(LLM + embeddings)"]
         Resend["Resend<br/>(transactional email)"]
-        LE["Let's Encrypt<br/>(certbot ACME)"]
+        LE["Let's Encrypt<br/>(ACME servers)"]
     end
 
     Candidate -->|HTTPS| Nginx
@@ -45,7 +45,8 @@ flowchart TB
     Worker <--> Storage
     Worker -->|embeddings + LLM| Gemini
     Worker -->|outreach send| Resend
-    Nginx -.->|cert renewal| LE
+    Certbot -.->|HTTP-01 challenge :80| LE
+    Certbot -.->|shared cert volume| Nginx
 ```
 
 > For full system design, ERD, sequence diagrams covering every major flow (resume upload, semantic search, RAG chat, agent turn, outreach draft + send), deployment topology, security boundaries, and scaling ladder, see [**docs/architecture.md**](docs/architecture.md).

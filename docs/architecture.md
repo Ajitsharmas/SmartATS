@@ -22,9 +22,9 @@ flowchart TB
     end
 
     subgraph vm["GCP Compute Engine VM (e2-micro)"]
-        Nginx["Nginx<br/>(TLS termination,<br/>connection + req rate limits,<br/>reverse proxy)"]
-
         subgraph compose["Docker Compose Network"]
+            Nginx["Nginx container<br/>:80 + :443<br/>TLS termination ·<br/>connection + req rate limits ·<br/>reverse proxy"]
+            Certbot["Certbot container<br/>(ACME cert renewal)"]
             API["FastAPI / uvicorn"]
             Worker["Celery Worker"]
             DB[("Postgres + pgvector")]
@@ -36,7 +36,7 @@ flowchart TB
     subgraph external["External Services"]
         Gemini["Gemini API<br/>(LLM + embeddings)"]
         Resend["Resend<br/>(transactional email)"]
-        LE["Let's Encrypt<br/>(certbot ACME)"]
+        LE["Let's Encrypt<br/>(ACME servers)"]
     end
 
     Candidate -->|HTTPS| Nginx
@@ -53,10 +53,11 @@ flowchart TB
     Worker <--> Storage
     Worker -->|embeddings + LLM| Gemini
     Worker -->|outreach send| Resend
-    Nginx -.->|cert renewal| LE
+    Certbot -.->|HTTP-01 challenge :80| LE
+    Certbot -.->|shared cert volume| Nginx
 ```
 
-**The single host runs everything.** No multi-node orchestration, no managed databases, no Kubernetes. The bottleneck is Gemini's free-tier quota (15 RPM, 1500/day) before it is CPU or RAM. This shape is deliberate: see [`docs/ai-features/roadmap.md`](ai-features/roadmap.md) for the constraint analysis.
+**The single host runs everything**, including TLS termination — Nginx and Certbot are both containers in the `docker-compose.prod.yaml` stack, sharing a Docker volume for the Let's Encrypt certificates. No multi-node orchestration, no managed databases, no Kubernetes. The bottleneck is Gemini's free-tier quota (15 RPM, 1500/day) before it is CPU or RAM. This shape is deliberate: see [`docs/ai-features/roadmap.md`](ai-features/roadmap.md) for the constraint analysis.
 
 ---
 
@@ -647,16 +648,17 @@ flowchart TB
         Firewall["VPC firewall<br/>allow 80, 443, 22 (locked-down source ranges)"]
 
         subgraph vm["Compute Engine e2-micro<br/>(1 vCPU, 1 GB RAM, free tier)"]
-            HostOS["Debian 12<br/>2 GB swap"]
-            Certbot["certbot<br/>(systemd timer for renewal)"]
-            NginxHost["Nginx (host)<br/>:80 + :443<br/>TLS terminator + req rate limits"]
+            HostOS["Debian 12<br/>2 GB swap<br/>Docker Engine"]
 
-            subgraph dockerC["Docker Compose"]
+            subgraph dockerC["Docker Compose<br/>(docker-compose.prod.yaml)"]
+                nginx["nginx container<br/>publishes :80, :443<br/>TLS terminator + req rate limits"]
+                certbot["certbot container<br/>(ACME renewal)"]
                 api["fastapi container<br/>:8000 internal"]
                 worker["celery worker container"]
                 pg["postgres + pgvector<br/>:5432 internal"]
                 redis["redis<br/>:6379 internal"]
                 minio["minio<br/>:9000 internal"]
+                certvol[("certbot/conf<br/>+ webroot volumes<br/>(shared)")]
             end
         end
     end
@@ -668,8 +670,8 @@ flowchart TB
 
     UserBrowser -->|HTTPS :443| StaticIP
     UserBrowser -.->|DNS resolve| DNS
-    StaticIP --> Firewall --> NginxHost
-    NginxHost --> api
+    StaticIP --> Firewall --> nginx
+    nginx --> api
     api --> pg
     api --> redis
     api --> minio
@@ -680,7 +682,9 @@ flowchart TB
     api -.->|outbound| Res
     worker -.->|outbound| Gem
     worker -.->|outbound| Res
-    Certbot -.->|ACME challenge :80| ACME
+    certbot -.->|HTTP-01 challenge :80| ACME
+    certbot --- certvol
+    nginx --- certvol
 ```
 
 **Why this shape**:
@@ -688,8 +692,8 @@ flowchart TB
 - Single-host because the bottleneck is Gemini's RPM quota, not compute.
 - e2-micro is free indefinitely (US regions only — see [`docs/deployment-gcp.md`](deployment-gcp.md)).
 - 2 GB swap because 1 GB RAM is tight with all containers running.
-- Nginx on the host (not in Docker) because cert renewal needs port 80 outside the Compose network. See [`docs/https-ssl.md`](https-ssl.md).
-- All containers listen on internal addresses only; only Nginx is exposed.
+- **Nginx and Certbot both live inside `docker-compose.prod.yaml`** and share a Docker volume for the Let's Encrypt cert + webroot directory. Certbot writes the challenge file into the webroot volume; Nginx serves it on `:80` at the `/.well-known/acme-challenge/` path, so the HTTP-01 challenge resolves without bouncing outside the Compose network. See [`docs/https-ssl.md`](https-ssl.md).
+- All non-Nginx containers listen on internal Compose-network addresses only; only the `nginx` container publishes `:80` and `:443` to the host.
 - VPC firewall locks SSH (port 22) to the operator's IP range; only 80 / 443 open to the world.
 
 ---
