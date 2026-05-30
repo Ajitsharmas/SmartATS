@@ -19,6 +19,8 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from sqlalchemy import text
+from datetime import datetime
+from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.ai import (
@@ -49,8 +51,12 @@ from app.models import (
     CrossApplicantResult,
     CrossJobMatch,
     CrossJobMatchResult,
+    CrossMatchInviteRequest,
+    DraftSendResponse,
+    EmailDraftPublic,
     JobListing,
     JobListingUpdate,
+    OutreachEmail,
     ResumeEmbedding,
     SearchQuery,
     SearchResponse,
@@ -74,8 +80,37 @@ from celery import chain
 # 1. LIFESPAN CONTEXT MANAGER
 # This is the "Startup Sequence" of our application.
 # Before the first user connects, we ensure the DB tables exist and MinIO is ready.
+_DEFAULT_SECRET_KEY = "79f0da0c3f80646ad690a44e39706380c40d0d777f5df57ad531c218f86bb270"
+
+
+def _check_critical_secrets() -> None:
+    """
+    Refuse to boot if SECRET_KEY is the default value baked into the public
+    repo. Without this guard, a forgotten `.env` override in production
+    means anyone who reads the repo can forge JWTs for any user — the most
+    catastrophic single misconfiguration possible.
+
+    Also warn loudly about other dev defaults that would be unsafe in
+    production (Gemini API key, MinIO credentials).
+    """
+    if settings.SECRET_KEY == _DEFAULT_SECRET_KEY:
+        raise RuntimeError(
+            "FATAL: SECRET_KEY is set to the public default value baked into the "
+            "repository. Anyone reading the repo can forge JWTs and impersonate any "
+            "user. Generate a fresh key with `openssl rand -hex 32` and set it in "
+            "your .env (or deployment env) under SECRET_KEY=... before starting "
+            "the server."
+        )
+    if settings.GEMINI_API_KEY == "fake-key-for-dev":
+        print("WARNING: GEMINI_API_KEY is the dev default. AI features will fail.")
+    if settings.MINIO_ACCESS_KEY in ("dummy", "") or settings.MINIO_SECRET_KEY in ("dummy", ""):
+        print("WARNING: MINIO credentials are dev defaults. File uploads will fail.")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    print("Startup: Checking critical secrets...")
+    _check_critical_secrets()
     print("Startup: Creating database tables...")
     create_db_and_tables()
     print("Startup: Checking Object Storage...")
@@ -164,6 +199,15 @@ async def read_search_page():
 async def read_settings_page():
     """Serve the account-settings page (settings.html). Requires a valid JWT."""
     return FileResponse("app/static/settings.html", headers=_NO_CACHE)
+
+
+@app.get("/assistant", include_in_schema=False)
+async def read_assistant_page():
+    """
+    Serve the recruiter assistant chat page (assistant.html). Requires a
+    valid JWT. The chat itself streams via POST /assistant/turn.
+    """
+    return FileResponse("app/static/assistant.html", headers=_NO_CACHE)
 
 
 @app.get("/login", include_in_schema=False)
@@ -526,8 +570,17 @@ async def upload_resume(
     # CRITICAL: Reset cursor so we can read the file again
     await file.seek(0)
 
-    # 3. Read content into memory
-    content = await file.read()
+    # 3. Read content into memory with a hard size cap. Without this a
+    # 100 MB PDF would OOM the worker during pypdf parsing OR drive a
+    # cost DoS via the embedding pipeline. We cap at 5 MB which fits any
+    # plausible resume comfortably (a CV with 50 dense pages is ~2 MB).
+    MAX_RESUME_BYTES = 5 * 1024 * 1024
+    content = await file.read(MAX_RESUME_BYTES + 1)
+    if len(content) > MAX_RESUME_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Resume too large. Maximum allowed size is {MAX_RESUME_BYTES // (1024 * 1024)} MB.",
+        )
 
     # 4. Text Extraction (For the AI)
     try:
@@ -1524,3 +1577,334 @@ async def get_processing_status(task_id: str):
         return {"status": "Failed", "error": str(task_result.result)}
 
     return {"status": task_result.state}
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — Outreach drafts (list / send / discard)
+# ---------------------------------------------------------------------------
+#
+# The endpoints below own the lifecycle of AI-drafted outreach emails. The
+# *creation* of drafts happens elsewhere — either via the chat agent's
+# `draft_email` tool (Phase 6 main agent) or the one-click cross-match-invite
+# endpoint. These endpoints handle viewing, sending, and discarding the
+# resulting drafts. Sending is the ONLY way an AI-drafted email ever leaves
+# the system; the agent itself can never trigger a network send.
+
+def _draft_to_public(session: Session, draft: OutreachEmail) -> EmailDraftPublic:
+    """Hydrate an OutreachEmail row with candidate + target-job info for the UI."""
+    app_record = session.get(Application, draft.application_id)
+    target_job = session.get(JobListing, draft.target_job_id) if draft.target_job_id else None
+    return EmailDraftPublic(
+        id=draft.id,
+        application_id=draft.application_id,
+        candidate_name=app_record.candidate_name if app_record else "(application deleted)",
+        candidate_email=app_record.candidate_email if app_record else "",
+        intent=draft.intent,
+        target_job_id=draft.target_job_id,
+        target_job_title=target_job.title if target_job else None,
+        subject=draft.subject,
+        body=draft.body,
+        status=draft.status,
+        created_at=draft.created_at,
+        sent_at=draft.sent_at,
+    )
+
+
+@app.get("/assistant/drafts", response_model=List[EmailDraftPublic], tags=["Assistant"])
+@limiter.limit("60/minute", key_func=get_user_key)
+def list_outreach_drafts(
+    request: Request,
+    session: SessionDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+    application_id: int | None = None,
+    status: str | None = None,
+):
+    """
+    List outreach drafts owned by the authenticated recruiter. Protected.
+
+    Optional filters:
+      - `?application_id=N` — only drafts for that candidate
+      - `?status=draft|sent|discarded` — defaults to all
+
+    Multi-tenancy is enforced via `recruiter_id == current_user.id`.
+
+    **Errors:**
+    - `401` – missing or invalid token
+    - `429` – rate limit hit (60/min per user)
+    """
+    statement = select(OutreachEmail).where(OutreachEmail.recruiter_id == current_user.id)
+    if application_id is not None:
+        statement = statement.where(OutreachEmail.application_id == application_id)
+    if status is not None:
+        statement = statement.where(OutreachEmail.status == status)
+    statement = statement.order_by(OutreachEmail.created_at.desc())
+
+    drafts = session.exec(statement).all()
+    return [_draft_to_public(session, d) for d in drafts]
+
+
+@app.post("/assistant/drafts/{draft_id}/send", response_model=DraftSendResponse, tags=["Assistant"])
+@limiter.limit("30/hour", key_func=get_user_key)
+def send_outreach_draft(
+    request: Request,
+    draft_id: int,
+    session: SessionDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    """
+    Send a previously-created outreach draft via Resend. Protected.
+
+    Updates the row's `status` to `"sent"` and stamps `sent_at`. Idempotent:
+    a second send attempt on the same draft returns 409.
+
+    **Errors:**
+    - `401` – missing or invalid token
+    - `403` – draft belongs to a different recruiter
+    - `404` – draft not found
+    - `409` – draft is not in `status="draft"` (already sent or discarded)
+    - `429` – rate limit hit (30/hour per user)
+    - `502` – Resend rejected the send; status stays `"draft"` so the recruiter can retry
+    """
+    # Local import keeps the auth/route module decoupled from the email side
+    # in tests; only this endpoint actually needs Resend at runtime.
+    from app.email import send_outreach_email
+    from resend.exceptions import ResendError
+
+    draft = session.get(OutreachEmail, draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found.")
+    if draft.recruiter_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized.")
+    if draft.status != "draft":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Draft is in status '{draft.status}' and cannot be sent again.",
+        )
+
+    app_record = session.get(Application, draft.application_id)
+    if not app_record:
+        raise HTTPException(status_code=404, detail="Application no longer exists.")
+
+    try:
+        message_id = send_outreach_email(
+            to_email=app_record.candidate_email,
+            subject=draft.subject,
+            body=draft.body,
+            recruiter_name=current_user.full_name or current_user.email,
+            recruiter_email=current_user.email,
+        )
+    except ResendError as e:
+        # Don't flip status — recruiter can retry later
+        raise HTTPException(status_code=502, detail=f"Email provider rejected the send: {e}")
+
+    draft.status = "sent"
+    draft.sent_at = datetime.now()
+    session.add(draft)
+    session.commit()
+    session.refresh(draft)
+
+    return DraftSendResponse(status="sent", sent_at=draft.sent_at, message_id=message_id)
+
+
+@app.post("/assistant/drafts/{draft_id}/discard", tags=["Assistant"])
+@limiter.limit("30/minute", key_func=get_user_key)
+def discard_outreach_draft(
+    request: Request,
+    draft_id: int,
+    session: SessionDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    """
+    Soft-delete an outreach draft. Marks `status="discarded"` rather than
+    deleting the row so we keep the audit trail of what the LLM proposed.
+
+    **Errors:**
+    - `401` – missing or invalid token
+    - `403` – draft belongs to a different recruiter
+    - `404` – draft not found
+    - `409` – draft is not in `status="draft"` (already sent — cannot un-send)
+    - `429` – rate limit hit (30/min per user)
+    """
+    draft = session.get(OutreachEmail, draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found.")
+    if draft.recruiter_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized.")
+    if draft.status == "sent":
+        raise HTTPException(
+            status_code=409,
+            detail="Draft has already been sent and cannot be discarded.",
+        )
+    if draft.status == "discarded":
+        return {"status": "discarded", "message": "Already discarded."}
+
+    draft.status = "discarded"
+    session.add(draft)
+    session.commit()
+    return {"status": "discarded"}
+
+
+@app.post(
+    "/applications/{application_id}/cross-match-invite",
+    response_model=EmailDraftPublic,
+    tags=["Assistant"],
+)
+@limiter.limit("30/hour", key_func=get_user_key)
+def cross_match_invite(
+    request: Request,
+    application_id: int,
+    payload: CrossMatchInviteRequest,
+    session: SessionDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    """
+    One-click contextual draft: invite a candidate (who applied to one role)
+    to apply to a *different* role the same recruiter has posted. Calls the
+    `draft_email_for_application` helper directly — no agent loop — and
+    persists the result in `outreach_email`. The candidate-modal UI clicks
+    this when the recruiter hits the "Draft invite email" button on a
+    cross-match row. Recruiter then reviews + clicks Send (separate endpoint).
+
+    Multi-tenancy: both the candidate's application's parent job *and* the
+    target matched job must belong to `current_user`. Cross-job matches are
+    only computed within a recruiter's pool, but we double-check defensively.
+
+    **Errors:**
+    - `401` – missing or invalid token
+    - `403` – application or matched job belongs to a different recruiter
+    - `404` – application or matched job not found
+    - `422` – draft generation produced unusable output (rare)
+    - `429` – rate limit hit (30/hour per user)
+    - `503` – Gemini quota exhausted or temporarily unavailable
+    """
+    from app.outreach import DraftEmailError, draft_email_for_application
+
+    # --- ownership checks ---
+    app_record = session.get(Application, application_id)
+    if not app_record:
+        raise HTTPException(status_code=404, detail="Application not found.")
+
+    parent_job = session.get(JobListing, app_record.job_id)
+    if not parent_job or parent_job.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized.")
+
+    target_job = session.get(JobListing, payload.matched_job_id)
+    if not target_job:
+        raise HTTPException(status_code=404, detail="Matched job not found.")
+    if target_job.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized.")
+
+    if target_job.id == parent_job.id:
+        raise HTTPException(
+            status_code=400,
+            detail="The matched job and the applied job are the same — not a cross-match.",
+        )
+
+    # --- draft via the shared LLM helper ---
+    try:
+        draft = draft_email_for_application(
+            session,
+            application_id=application_id,
+            target_job_id=payload.matched_job_id,
+            intent="cross_match_invite",
+            recruiter=current_user,
+            tone="warm and inviting",
+        )
+    except GeminiQuotaExhaustedError:
+        raise HTTPException(
+            status_code=503,
+            detail="Gemini's daily free-tier quota has been exhausted. "
+                   "Try again after the quota resets (~24 hours) or upgrade your plan.",
+        )
+    except GeminiUnavailableError:
+        raise HTTPException(
+            status_code=503,
+            detail="Gemini is experiencing high demand. Please try again in a few minutes.",
+        )
+    except DraftEmailError as e:
+        raise HTTPException(status_code=422, detail=f"Draft generation failed: {e}")
+
+    return _draft_to_public(session, draft)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — Chat assistant turn (SSE) and reset
+# ---------------------------------------------------------------------------
+
+class _AssistantTurnRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+
+
+@app.post("/assistant/turn", tags=["Assistant"])
+@limiter.limit("10/minute", key_func=get_user_key)
+async def assistant_turn(
+    request: Request,
+    payload: _AssistantTurnRequest,
+    session: SessionDep,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    """
+    Drive one turn of the recruiter assistant agent. SSE stream.
+
+    Each call:
+      1. Inside the streaming generator: opens a fresh DB session and sets
+         the per-request agent context (user + session) via contextvar so
+         tools can run with auth scope. Setting it here (not in the
+         endpoint body) guarantees the contextvar is alive in the same
+         coroutine that LangGraph uses to execute the tools.
+      2. Loads the rolling conversation history for this recruiter from Redis.
+      3. Runs the LangGraph agent loop, streaming intermediate events as SSE.
+      4. Persists the new conversation turns back to Redis on completion.
+
+    SSE event types emitted:
+      thinking       — soft status text
+      tool_call      — agent invoked a tool {tool_call_id, name, args}
+      tool_result    — tool completed {tool_call_id, name, summary, errored}
+      email_draft    — draft_email tool produced a draft (full draft fields)
+      token          — token of final synthesis
+      system_message — soft amber notice (quota exhausted, transient unavail)
+      error          — hard red notice (unexpected failure)
+      done           — end of turn
+
+    Rate-limited to 10/min per user because each turn fires multiple LLM calls.
+    """
+    from app.agent import run_turn_stream, set_agent_context
+    from app.database import engine as _engine
+
+    user_id = current_user.id
+    user_email = current_user.email
+    user_message = payload.message
+
+    async def event_stream():
+        # Open a dedicated DB session for the turn so the agent context can
+        # safely outlive the request-scoped session injected by FastAPI.
+        # Set the contextvar inside the generator so it's bound to the same
+        # asyncio task LangGraph uses to drive tool execution.
+        from app.models import User as _User
+        with Session(_engine) as agent_session:
+            recruiter = agent_session.get(_User, user_id)
+            if recruiter is None:
+                yield f"event: error\ndata: {{\"detail\": \"User not found\"}}\n\n"
+                yield "event: done\ndata: {}\n\n"
+                return
+            set_agent_context(recruiter, agent_session)
+            print(f"agent: turn for user_id={user_id} email={user_email} message={user_message[:120]!r}")
+            async for sse_chunk in run_turn_stream(user_id, user_message):
+                yield sse_chunk
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/assistant/reset", tags=["Assistant"])
+@limiter.limit("30/minute", key_func=get_user_key)
+def assistant_reset(
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+):
+    """
+    Clear the recruiter's rolling chat history in Redis. New conversations
+    start fresh after this call. Drafts in `outreach_email` are NOT affected.
+    """
+    from app.agent import clear_history
+    clear_history(current_user.id)
+    return {"status": "reset"}

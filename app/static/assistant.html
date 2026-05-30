@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Assistant - SmartATS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <style> body { font-family: 'Inter', sans-serif; } </style>
+</head>
+<body class="bg-slate-50 min-h-screen" data-route="assistant">
+
+    <nav class="bg-white border-b border-slate-200 shadow-sm h-14">
+        <div class="max-w-7xl mx-auto px-8 h-full flex items-center justify-between">
+            <a href="/dashboard" class="font-bold text-2xl text-indigo-600 tracking-tight">SmartATS</a>
+            <div class="flex items-center gap-6">
+                <a href="/dashboard" data-route="jobs"      class="nav-link text-sm font-medium text-slate-600 hover:text-indigo-600 transition">Jobs</a>
+                <a href="/search"    data-route="search"    class="nav-link text-sm font-medium text-slate-600 hover:text-indigo-600 transition">Search</a>
+                <a href="/assistant" data-route="assistant" class="nav-link text-sm font-medium text-slate-600 hover:text-indigo-600 transition">Assistant</a>
+                <a href="/settings"  data-route="settings"  class="nav-link text-sm font-medium text-slate-600 hover:text-indigo-600 transition">Settings</a>
+            </div>
+            <div class="flex items-center gap-4">
+                <button id="aiStatusBtn"
+                    class="flex items-center gap-1.5 text-sm font-medium px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:border-indigo-400 hover:text-indigo-600 transition">
+                    <span id="aiStatusDot" class="w-2 h-2 rounded-full bg-slate-300"></span>
+                    <span id="aiStatusLabel">Check AI</span>
+                </button>
+                <button onclick="localStorage.removeItem('access_token'); window.location.href='/login'" class="text-sm text-slate-500 hover:text-red-600">Logout</button>
+            </div>
+        </div>
+    </nav>
+
+    <!--
+      Flex-column layout pinned to viewport height (nav is h-14 = 3.5rem
+      so the main fills the remainder). The chat box itself is flex-1 +
+      min-h-0 so #chatMessages can scroll independently instead of pushing
+      the page taller as messages pile up. The `min-h-0` is non-obvious
+      but critical: flex children default to min-height: auto (= content),
+      which prevents overflow-y-auto from kicking in.
+    -->
+    <main class="max-w-4xl mx-auto px-6 py-6 flex flex-col" style="height: calc(100vh - 3.5rem);">
+
+        <header class="mb-4 flex justify-between items-end flex-shrink-0">
+            <div>
+                <h1 class="text-2xl font-bold text-slate-800">Recruiter Assistant</h1>
+                <p class="text-sm text-slate-500 mt-1">
+                    Ask questions about your candidates, draft job descriptions, or compose outreach emails.
+                </p>
+            </div>
+            <button id="newConversationBtn" class="text-xs font-medium text-slate-500 hover:text-indigo-600 border border-slate-200 hover:border-indigo-300 rounded-lg px-3 py-2 transition">
+                ↻ New conversation
+            </button>
+        </header>
+
+        <p class="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2 mb-4 flex-shrink-0">
+            AI-drafted emails appear here as editable cards. They are never sent until you click Send.
+        </p>
+
+        <div class="bg-white border border-slate-200 rounded-xl shadow-sm flex flex-col flex-1 min-h-0">
+
+            <div id="chatMessages" class="flex-1 overflow-y-auto p-6 space-y-4 min-h-0">
+                <div id="initialPlaceholder" class="text-center text-sm text-slate-400 italic py-8">
+                    Try: <em>"Find my top 3 Python candidates"</em>,
+                    <em>"Draft a rejection email for application 42"</em>,
+                    or <em>"Write a job description for a senior backend engineer"</em>.
+                </div>
+            </div>
+
+            <form id="assistantForm" class="border-t border-slate-100 p-4 flex gap-2 flex-shrink-0">
+                <input id="assistantInput" type="text" required minlength="1" maxlength="2000"
+                    placeholder="Ask the assistant…"
+                    class="flex-1 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition">
+                <button type="submit" id="assistantSend"
+                    class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium px-5 rounded-lg transition disabled:bg-slate-300">
+                    Send
+                </button>
+            </form>
+
+        </div>
+
+    </main>
+
+    <script src="/static/js/api.js"></script>
+    <script src="/static/js/ai-status.js"></script>
+    <script src="/static/js/candidate-modal.js"></script>
+    <script src="/static/js/assistant-page.js"></script>
+</body>
+</html>

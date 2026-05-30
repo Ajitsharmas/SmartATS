@@ -61,6 +61,7 @@ An AI-powered Applicant Tracking System built with FastAPI, Celery, and Google G
 
 | Topic | Description |
 |---|---|
+| [Security — Threat Model](docs/security.md) | Honest catalogue of attack surface, prompt-injection mitigations (tag-isolation, output filtering, recruiter approval), auth + secret hardening, residual risks, incident-response runbook |
 | [Rate Limiting](docs/rate-limiting.md) | SlowAPI + Redis rate limits on all endpoints, dual user+IP limiting for the AI health probe, race condition safety, fixed window behaviour |
 | [DDoS Resistance](docs/ddos-resistance.md) | Nginx connection limits, request rate zones, how Nginx matches zones to URL paths, known gaps |
 | [Deployment — GCP](docs/deployment-gcp.md) | Step-by-step GCP Compute Engine free-tier deployment, static IP billing rules, swap space, DB migration, DBeaver firewall |

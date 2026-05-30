@@ -99,7 +99,7 @@ Building this foundation once enables all three features.
 | 3 | **Feature 3 — Cross-Job Match** — embed jobs, run match on application submit | Half day | Complete |
 | 4 | **Feature 1 — RAG Q&A** endpoint and chat UI on candidate detail page | 1–2 days | Complete |
 | 5 | **LLM Re-ranking** — two-stage retrieve-then-rerank quality improvement for Phase 2 + 3 | 1–2 days | Complete |
-| 6 | **Feature 4 — Recruiter Assistant Agent** — read-only chat assistant + job-authoring tools + candidate outreach (drafts only, recruiter-approved sends via Resend). Scope: Tiers 2 + 3 + 5 from the agentic-tiers analysis. | 1 week | Designed — see [phase-6-agent.md](phase-6-agent.md) |
+| 6 | **Feature 4 — Recruiter Assistant Agent** — read-only chat assistant + job-authoring tools + candidate outreach (drafts only, recruiter-approved sends via Resend). Scope: Tiers 2 + 3 + 5 from the agentic-tiers analysis. | 1 week | Complete |
 
 ---
 

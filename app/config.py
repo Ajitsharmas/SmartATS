@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "models/gemini-embedding-001"
     EMBEDDING_DIMENSIONS: int = 768
 
+    # The chat / generation model used everywhere we talk to Gemini for
+    # non-embedding work — Phase 1 scoring, Phase 4 RAG, Phase 5 rerank,
+    # Phase 6 agent + outreach. Bumping this in .env lets us switch
+    # gemini-2.5-flash → gemini-2.5-pro or to a future model without code edits.
+    LLM_MODEL_NAME: str = "gemini-2.5-flash"
+
     # Chunking strategy (used in Phase 1)
     RESUME_CHUNK_SIZE: int = 500       # characters
     RESUME_CHUNK_OVERLAP: int = 50

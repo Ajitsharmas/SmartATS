@@ -221,15 +221,16 @@ The chat panel needs to render more than just streaming tokens. Event types:
 
 | Event | Payload | UI rendering |
 |---|---|---|
-| `thinking` | `{ message: str }` | Greyed-out italic placeholder while the planner runs |
-| `tool_call` | `{ tool_call_id, name, args }` | Collapsible chip *"Used `search_candidates(query='Kubernetes')`"* |
-| `tool_result` | `{ tool_call_id, summary }` | Inline result preview (short — not the full payload) |
-| `token` | `{ content }` | Streamed into the assistant bubble |
-| `email_draft` | `{ draft_id, application_id, subject, body, intent, target_job_id? }` | Inline editable email card with Send / Discard / Edit |
-| `done` | `{}` | End of turn marker |
-| `error` | `{ detail }` or `system_message` channel | Red error or amber system notice (reuses Phase 4 quota-exhausted styling) |
+| `thinking` | `{ content: str }` | Greyed-out italic placeholder under the assistant label. Emitted once per turn (`"Planning…"`). Per-tool *"Using tool: X…"* events were removed — the chip itself with its friendly label + spinner conveys the same info without leaking raw tool names. |
+| `tool_call` | `{ tool_call_id, name, args }` | Collapsible `<details>` chip with a friendly label (e.g. *"Looking up your jobs"* not `list_jobs({})`). Raw `name` + `args` are hidden inside the disclosure for debugging. |
+| `tool_result` | `{ tool_call_id, name, summary, errored }` | Flips the chip's spinner to a green dot ("Done: …") on success or a red dot ("Failed: …") when `errored=true`, with the raw result revealed inside the disclosure. The `errored` flag is set when the tool returned a JSON `{"error": "..."}` payload. |
+| `token` | `{ content }` | Appended to the assistant bubble's text region. Emitted **only once per chat-model invocation** — the agent buffers chunks internally and flushes the full synthesis at `on_chat_model_end` (live token-by-token streaming was a casualty of the buffering fix, see Post-release fixes below). |
+| `email_draft` | `{ draft_id, application_id, subject, body, intent, target_job_id?, candidate_name, candidate_email }` | Inline editable email card with Review & Send button. Visually rendered **above** the synthesis text in the bubble (DOM order matters — see Post-release fixes). |
+| `done` | `{}` | End of turn marker. Clears the thinking placeholder. |
+| `system_message` | `{ content }` | Amber notice for soft failures — quota exhausted, transient Gemini outage. Reuses Phase 5.1's `_classify_gemini_error` classifier so the message text matches the Phase 4 chat experience. |
+| `error` | `{ detail }` | Red notice for genuine bugs. Raw exception text never reaches the user; the server-side `print()` keeps the diagnostic. |
 
-Same SSE plumbing as Phase 4 chat — `text/event-stream`, one event per line, JSON-encoded payload.
+Same SSE plumbing as Phase 4 chat — `text/event-stream`, blank-line separated, JSON-encoded payload.
 
 ### 9. Guardrails — non-negotiable
 
@@ -507,6 +508,14 @@ full role description and apply.
 | Recruiter sends the same draft twice | `outreach_email.status != "draft"` check before send | Returns 409 with `{"detail": "already sent"}` |
 | Email body contains hallucinated company | Mitigated by prompt rules; can't fully prevent | Recruiter is the safety net — they review every draft. Audit logs let us inspect later. |
 | Agent gets stuck in a tool loop (calling same tool repeatedly) | Within-turn tool cache returns cached result | Avoids redundant work; planner sees same result and moves on |
+| **Gemini streams JSON args as text content during tool-deciding turns** | `on_chat_model_end`: buffer is flushed only when the final `AIMessage` has no `tool_calls`. Buffered chunks from tool-deciding turns are discarded. | Card renders cleanly; no raw JSON in the chat. Cost: live token streaming for the final synthesis is replaced by a single end-of-turn flush. |
+| **Gemini occasionally returns `chunk.content` as a list of multi-modal dicts** | `_extract_chunk_text` coerces `str`, `list[str]`, and `list[{"type": "text", "text": "…"}]` into plain text. | Prevents `[object Object]` leaking into chat. |
+| **Model echoes a `draft_email` tool's JSON output back in its synthesis text** | `_strip_tool_echoes()` regex removes markdown JSON fences from the buffered text before flushing. Reinforced by an explicit "NEVER ECHO TOOL OUTPUT" rule in the system prompt. | Card renders once via `email_draft` SSE; synthesis stays prose-only. |
+| **Model claims "I've drafted…" on a repeat request without actually calling `draft_email`** (because the prior turn's `"I've drafted…"` text is in Redis-backed chat history) | System prompt rule 1 explicitly requires a fresh `draft_email` call **every time** the user asks. Server-side heuristic warning logs `agent: WARNING … claimed to have drafted… but did not call draft_email this turn`. | Forces a fresh draft + new card. As a manual escape, the user can click *"↻ New conversation"* to clear Redis history. |
+| **Tool output not a `ToolMessage` instance in `on_tool_end`** (LangGraph delivers raw return values, not wrapped messages) | `on_tool_end` extraction now handles `str`, `ToolMessage`, and `dict` shapes uniformly via a permissive coercion before JSON-parsing. | `email_draft` SSE event fires reliably; the draft card now renders for any successful `draft_email` call. |
+| **Starlette runs the `StreamingResponse` generator in a separate context, so a `contextvar` set in the request handler is lost** | `set_agent_context(user, session)` is now called *inside* the generator body, with a fresh `Session(engine)` bound to the generator's scope. | Tools run with the correct recruiter auth scope; the previous failure mode was all tools silently raising `"agent context not set"` and the turn ending with no visible effect. |
+| **Chat window expands the whole page instead of scrolling internally** | Layout uses `height: calc(100vh - 3.5rem)` on `<main>` with `flex flex-col` + `flex-1 min-h-0` on the chat box. The `min-h-0` overrides the default `min-height: auto` on flex items, letting `overflow-y-auto` actually kick in. | Inner messages area scrolls; the input form and page chrome stay anchored. |
+| **Draft card rendered visually BELOW the synthesis text despite the LLM saying "card above"** | `renderAssistantContainer` DOM order changed: drafts now appear before text. | LLM's "above"/"below" phrasing now matches visual order. |
 
 ---
 
@@ -571,11 +580,44 @@ After Phase 6 lands:
 
 ## Status
 
-Designed. Implementation pending. Recommended order:
+Complete. Shipped in:
 
-1. Schema + Resend send pipeline + `outreach_email` CRUD endpoints
-2. Cross-match invite shortcut (smaller surface, easier to validate)
-3. Agent skeleton + Tier 2 tools + `/assistant` page (read-only chat)
-4. Tier 3 generation tools
-5. Tier 5 chat-initiated `draft_email` tool
-6. Smoke test, then docs flip to Complete
+**Schema + outreach foundation**
+- `app/models.py` — `OutreachEmail` SQLModel table (status, intent, target_job_id, custom_notes), `EmailDraftPublic` API schema, `CrossMatchInviteRequest`, `DraftSendResponse`, `OutreachIntent` and `OutreachStatus` Literals.
+- `app/email.py` — new `send_outreach_email()` helper with minimal neutral styling, sets `Reply-To` to the recruiter's email.
+- `app/main.py` — `GET /assistant/drafts`, `POST /assistant/drafts/{id}/send`, `POST /assistant/drafts/{id}/discard` with owner-scoping, idempotent send guard (409), Resend failure mapping (502), and rate limits per the decision table.
+
+**Single-shot draft + cross-match invite**
+- `app/outreach.py` — new module with `draft_email_for_application()`: top-K resume chunks (Phase 5.2 helper), intent-specific guidance, public URL injection for cross_match_invite, hallucination-resistant prompt, JSON parse with fence tolerance, persists `OutreachEmail` row.
+- `app/main.py` — `POST /applications/{application_id}/cross-match-invite` endpoint (30/hour) for the one-click contextual draft.
+- `app/static/js/api.js` — `draftCrossMatchInvite`, `sendDraft`, `discardDraft` helpers.
+- `app/static/js/candidate-modal.js` — "Draft invite email →" button on every cross-match row; new draft-review modal stacked on top of the candidate modal with editable subject + body, AI-drafted warning banner, Send / Discard / edit-warning guard.
+
+**LangGraph agent**
+- `requirements.txt` — added `langgraph>=0.2.0`.
+- `app/agent.py` — full agent module:
+  - `AgentContext` + contextvar set by the endpoint; tools read it to enforce auth.
+  - Rolling chat history in Redis keyed by `agent:history:{user_id}`, 16-message sliding window, 7-day TTL.
+  - 13 tools total: 7 Tier 2 (`list_jobs`, `get_job_details`, `get_applicants`, `get_candidate`, `get_cross_matches`, `search_candidates`, `ask_about_resume`) + 4 Tier 3 (`draft_job_description`, `improve_job_description`, `generate_interview_questions`, `generate_screening_rubric`) + 2 Tier 5 (`draft_email`, `list_drafts`).
+  - LangGraph state graph: planner ↔ ToolNode loop with hard cap at 8 tool calls/turn; tools return structured errors (`{"error": "..."}`) for self-correction.
+  - `run_turn_stream(user_id, message)` async generator that yields SSE-formatted events (`thinking`, `tool_call`, `tool_result`, `email_draft`, `token`, `system_message`, `error`, `done`), translating LangGraph's `astream_events` v2 stream.
+  - Quota / unavailable errors classified via `_classify_gemini_error` and emitted as soft `system_message` rather than raw stack traces.
+- `app/main.py` — `POST /assistant/turn` SSE endpoint (10/min) wraps `run_turn_stream`; `POST /assistant/reset` (30/min) clears history.
+
+**Frontend**
+- `app/static/assistant.html` + `app/static/js/assistant-page.js` — `/assistant` page with chat input, message rendering, tool-call chips (collapsible `<details>`), email-draft cards that route into the existing draft-review modal via `CandidateModal.openDraftReview()`. SSE parsed via `fetch` + `ReadableStream` (POST means EventSource doesn't apply).
+- `dashboard.html` / `job.html` / `search.html` / `settings.html` — "Assistant" tab added to the shared nav between Search and Settings.
+
+**Tests + docs**
+- `scripts/smoke_test_phase6.py` — exercises the tool palette presence, owner-scoped data access, multi-tenancy refusal across two recruiters, the `draft_email_for_application` cross_match_invite flow (asserts the public URL is embedded), `list_drafts` discovery, status transitions, and that `run_turn_stream` produces a well-formed SSE event stream (planner mocked to avoid burning live Gemini quota).
+- `docs/ai-features/phase-6-agent.md` — this file, status flipped to Complete.
+- `docs/ai-features/roadmap.md` — Phase 6 row already points at this doc.
+
+### Known follow-ups (deliberately not in v1)
+
+- **Edit-then-send for chat-initiated drafts**: the draft-review modal's textareas are editable but the edits aren't yet persisted before send. The send currently fires the ORIGINAL AI-drafted version; the UI warns the recruiter if they edited. Add a `PATCH /assistant/drafts/{id}` endpoint + persist-on-send flow in v2.
+- **Tier 4 (read-write internal state)** — `change_status`, `tag_candidate`, `shortlist`. Out of scope; the draft email serves as the rejection.
+- **Per-recruiter sender domains** — single shared `noreply@<APP_BASE_URL>` for v1.
+- **Multi-session conversation history** — single rolling chat in v1; ChatGPT-style sidebar is v2.
+- **Bounce/complaint webhook from Resend** — drafts marked `sent` won't auto-update if the email bounces.
+- **Eval harness** — beyond the smoke test, no formal eval framework. Worth adding before this is used at scale.

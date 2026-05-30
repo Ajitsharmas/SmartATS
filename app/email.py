@@ -72,6 +72,56 @@ def send_password_reset_email(to_email: str, full_name: str, token: str) -> None
     _send(to_email, "Reset your SmartATS password", body)
 
 
+def send_outreach_email(
+    to_email: str,
+    subject: str,
+    body: str,
+    recruiter_name: str,
+    recruiter_email: str,
+) -> str | None:
+    """
+    Send a Phase 6 outreach email (rejection, invite, follow-up, etc.).
+
+    Visually distinct from the SmartATS transactional emails — no big purple
+    header, no logo, no "powered by" footer. The email should feel like it
+    came from the recruiter, not from the platform. Recruiter's name appears
+    in the body sign-off and as the Reply-To address, so candidates replying
+    land in the recruiter's inbox directly.
+
+    `body` is plain text from the LLM. We convert newlines to <br> and wrap
+    in a minimal HTML scaffold but keep styling deliberately neutral.
+
+    Returns the Resend message id on success (or None if the SDK didn't
+    surface one). Raises ResendError on failure — caller decides how to
+    surface that to the user.
+    """
+    safe_body = html.escape(body).replace("\n", "<br>")
+    html_body = f"""<!DOCTYPE html>
+<html>
+<body style="font-family:Inter,Arial,sans-serif;background:#ffffff;color:#1e293b;margin:0;padding:32px 16px;">
+  <div style="max-width:600px;margin:0 auto;line-height:1.6;font-size:15px;">
+    {safe_body}
+    <hr style="border:none;border-top:1px solid #e2e8f0;margin:32px 0 12px;">
+    <p style="color:#94a3b8;font-size:11px;margin:0;">
+      Sent via SmartATS on behalf of {html.escape(recruiter_name)}. Replies go directly to {html.escape(recruiter_email)}.
+    </p>
+  </div>
+</body>
+</html>"""
+
+    result = resend.Emails.send({
+        "from": settings.FROM_EMAIL,
+        "to": [to_email],
+        "subject": subject,
+        "html": html_body,
+        "reply_to": recruiter_email,
+    })
+    # Resend Python SDK returns a dict with "id" on success
+    if isinstance(result, dict):
+        return result.get("id")
+    return None
+
+
 def send_application_scored_email(
     to_email: str, candidate_name: str, job_title: str, is_rescore: bool = False
 ) -> None:

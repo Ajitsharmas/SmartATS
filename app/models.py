@@ -390,3 +390,96 @@ class Citation(BaseModel):
     chunk_index: int
     chunk_text: str
     similarity: float
+
+
+# --- PHASE 6 — OUTREACH / AGENT MODELS ---
+#
+# AI-drafted candidate outreach emails. Drafts are created by either:
+#   (a) the chat agent calling its draft_email tool, or
+#   (b) the contextual one-click "Draft invite email" button on the
+#       candidate modal's cross-match section.
+# Drafts are NEVER auto-sent. The recruiter clicks Send in the UI to fire
+# the actual Resend call; that flips status from "draft" to "sent".
+
+# Allowed values for OutreachEmail.intent. Kept as a Literal so SQLModel
+# accepts free-form strings (Postgres doesn't need an ENUM here) while still
+# constraining what callers can write.
+OutreachIntent = Literal[
+    "rejection",
+    "interview_invite",
+    "offer",
+    "follow_up",
+    "cross_match_invite",
+    "custom",
+]
+
+OutreachStatus = Literal["draft", "sent", "discarded"]
+
+
+class OutreachEmail(SQLModel, table=True):
+    """
+    A single AI-drafted outreach email. Persisted at draft time and never
+    deleted — `status` tracks lifecycle. Sent only after the recruiter clicks
+    Send via the UI; that updates status to "sent" and stamps `sent_at`.
+    """
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    application_id: int = Field(
+        sa_column=Column(Integer, ForeignKey("application.id", ondelete="CASCADE"),
+                         nullable=False, index=True)
+    )
+    recruiter_id: int = Field(
+        sa_column=Column(Integer, ForeignKey("user.id", ondelete="CASCADE"),
+                         nullable=False, index=True)
+    )
+
+    intent: str  # one of OutreachIntent literal values
+
+    # If the intent is cross_match_invite, this is the job we're inviting
+    # the candidate to apply to. The public URL APP_BASE_URL/job/{target_job_id}
+    # is embedded in the email body so they can view and apply.
+    target_job_id: int | None = Field(
+        sa_column=Column(Integer, ForeignKey("joblisting.id", ondelete="SET NULL"),
+                         nullable=True)
+    )
+
+    subject: str
+    body: str = Field(sa_column=Column(Text, nullable=False))
+
+    status: str = Field(default="draft")  # one of OutreachStatus literal values
+
+    # What the recruiter (or agent) said about how to shape the email.
+    # Useful for audit and for regeneration.
+    custom_notes: str | None = None
+
+    created_at: datetime = Field(default_factory=datetime.now)
+    sent_at: datetime | None = None
+
+
+class EmailDraftPublic(SQLModel):
+    """Response shape for the outreach endpoints — flat, joined with the candidate + target-job info the UI needs."""
+    id: int
+    application_id: int
+    candidate_name: str
+    candidate_email: str
+    intent: str
+    target_job_id: int | None
+    target_job_title: str | None
+    subject: str
+    body: str
+    status: str
+    created_at: datetime
+    sent_at: datetime | None
+
+
+class CrossMatchInviteRequest(BaseModel):
+    """Body for POST /applications/{id}/cross-match-invite — the one-click contextual draft."""
+    matched_job_id: int
+
+
+class DraftSendResponse(BaseModel):
+    """Response for POST /assistant/drafts/{id}/send."""
+    status: str            # "sent"
+    sent_at: datetime
+    message_id: str | None = None  # Resend message id when available

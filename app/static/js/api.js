@@ -274,6 +274,24 @@ class Api {
         return await this.request(`/jobs/${jobId}/cross-applicants`);
     }
 
+    // Phase 6 — Outreach drafts.
+    // draftCrossMatchInvite generates a single email draft (LLM call) inviting
+    // the candidate (who applied elsewhere) to apply for `matchedJobId`.
+    // Returns an EmailDraftPublic — the recruiter then clicks Send / Discard.
+    static async draftCrossMatchInvite(applicationId, matchedJobId) {
+        return await this.request(
+            `/applications/${applicationId}/cross-match-invite`,
+            "POST",
+            { matched_job_id: matchedJobId },
+        );
+    }
+    static async sendDraft(draftId) {
+        return await this.request(`/assistant/drafts/${draftId}/send`, "POST");
+    }
+    static async discardDraft(draftId) {
+        return await this.request(`/assistant/drafts/${draftId}/discard`, "POST");
+    }
+
     // Phase 4 — Streaming RAG Q&A.
     //
     // POSTs the question + session_id and consumes the server-sent event

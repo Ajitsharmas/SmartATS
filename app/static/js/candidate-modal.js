@@ -247,10 +247,47 @@ const CandidateModal = (() => {
                             <span class="text-xs font-bold px-2 py-0.5 rounded ${pctClass} flex-shrink-0 ml-2">${pct}% match</span>
                         </div>
                         ${critiqueBlock}
+                        <div class="mt-2 flex justify-end">
+                            <button data-action="draft-invite" data-matched-job-id="${m.matched_job_id}"
+                                class="text-xs font-medium text-indigo-600 hover:text-indigo-800 border border-indigo-200 rounded px-2 py-1 hover:bg-indigo-50 transition">
+                                Draft invite email →
+                            </button>
+                        </div>
                     </div>`;
             }).join('');
+
+            // Wire the "Draft invite email" buttons. Each opens the draft
+            // preview modal after calling the cross-match-invite endpoint.
+            listEl.querySelectorAll('button[data-action="draft-invite"]').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const matchedJobId = Number(btn.dataset.matchedJobId);
+                    handleDraftInvite(btn, matchedJobId);
+                });
+            });
         } catch (_) {
             listEl.innerHTML = '<div class="text-xs text-red-500">Could not load matches.</div>';
+        }
+    }
+
+    // Phase 6 — draft an invite email for a cross-match. Triggers one LLM
+    // call server-side, persists the draft, then opens the draft-review
+    // modal so the recruiter can edit and send.
+    async function handleDraftInvite(btn, matchedJobId) {
+        const app = currentApp;
+        if (!app) return;
+
+        const originalText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Drafting…';
+
+        try {
+            const draft = await Api.draftCrossMatchInvite(app.id, matchedJobId);
+            openDraftReview(draft);
+        } catch (_) {
+            // Api.request already showed the modal
+        } finally {
+            btn.disabled = false;
+            btn.textContent = originalText;
         }
     }
 
@@ -334,7 +371,132 @@ const CandidateModal = (() => {
         document.getElementById('atsModal').classList.add('hidden');
     }
 
-    return { open, close };
+    // ---------------------------------------------------------------------
+    // Draft-review modal (Phase 6) — used by the "Draft invite email"
+    // button on cross-match rows. Sits on top of the candidate modal so the
+    // recruiter can review/edit/send without losing context.
+    // ---------------------------------------------------------------------
+
+    let draftMounted = false;
+    let currentDraftId = null;
+
+    function mountDraftModal() {
+        if (draftMounted) return;
+        const wrap = document.createElement('div');
+        wrap.innerHTML = `
+            <div id="draftReviewModal" class="hidden fixed inset-0 bg-slate-900/60 flex items-center justify-center z-[60] backdrop-blur-sm">
+                <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 p-6 max-h-[90vh] overflow-y-auto">
+                    <div class="flex justify-between items-start mb-4">
+                        <div>
+                            <h3 class="text-lg font-bold text-slate-800">Review draft email</h3>
+                            <p id="draftReviewMeta" class="text-xs text-slate-500 mt-0.5"></p>
+                        </div>
+                        <button id="draftCloseBtn" class="text-slate-400 hover:text-slate-600">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                        </button>
+                    </div>
+
+                    <p class="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 mb-3">
+                        AI-drafted. Please review carefully before sending.
+                    </p>
+
+                    <div class="mb-3">
+                        <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Subject</label>
+                        <input id="draftSubject" type="text" maxlength="200"
+                            class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none">
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="block text-xs font-bold text-slate-500 uppercase mb-1">Body</label>
+                        <textarea id="draftBody" rows="12"
+                            class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none font-mono"></textarea>
+                    </div>
+
+                    <p class="text-[11px] text-slate-400 mb-4">
+                        Reply-To will be set to your account email so candidate replies come back to you.
+                    </p>
+
+                    <div class="flex justify-end gap-2">
+                        <button id="draftDiscardBtn" class="px-4 py-2 bg-white border border-slate-300 text-slate-700 rounded-lg hover:bg-red-50 hover:border-red-200 hover:text-red-700 font-medium text-sm">
+                            Discard
+                        </button>
+                        <button id="draftSendBtn" class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium text-sm">
+                            Send
+                        </button>
+                    </div>
+                </div>
+            </div>`;
+        document.body.appendChild(wrap.firstElementChild);
+
+        const closeDraft = () => document.getElementById('draftReviewModal').classList.add('hidden');
+        document.getElementById('draftCloseBtn').addEventListener('click', closeDraft);
+
+        document.getElementById('draftDiscardBtn').addEventListener('click', async () => {
+            if (!currentDraftId) return;
+            const ok = confirm('Discard this draft? This cannot be undone.');
+            if (!ok) return;
+            try {
+                await Api.discardDraft(currentDraftId);
+                showModal('Draft discarded.', 'success');
+                closeDraft();
+            } catch (_) { /* shown by Api.request */ }
+        });
+
+        document.getElementById('draftSendBtn').addEventListener('click', async () => {
+            if (!currentDraftId) return;
+            const sendBtn = document.getElementById('draftSendBtn');
+            // The recruiter may have edited subject/body in the modal — we
+            // don't currently persist edits before send, so warn them.
+            const originalSubject = sendBtn.dataset.originalSubject || '';
+            const originalBody = sendBtn.dataset.originalBody || '';
+            const currentSubject = document.getElementById('draftSubject').value;
+            const currentBody = document.getElementById('draftBody').value;
+            if (currentSubject !== originalSubject || currentBody !== originalBody) {
+                const ok = confirm(
+                    'You have edited the draft but those edits are not yet persisted. '
+                    + 'Sending now will send the ORIGINAL AI-drafted version. Continue?'
+                );
+                if (!ok) return;
+            }
+            sendBtn.disabled = true;
+            sendBtn.textContent = 'Sending…';
+            try {
+                await Api.sendDraft(currentDraftId);
+                showModal('Email sent.', 'success');
+                closeDraft();
+            } catch (_) {
+                /* shown by Api.request */
+            } finally {
+                sendBtn.disabled = false;
+                sendBtn.textContent = 'Send';
+            }
+        });
+
+        draftMounted = true;
+    }
+
+    function openDraftReview(draft) {
+        mountDraftModal();
+        currentDraftId = draft.id;
+
+        const meta = `To: ${draft.candidate_name} <${draft.candidate_email}>`
+            + (draft.target_job_title ? ` · About: ${draft.target_job_title} (Job ID: ${draft.target_job_id})` : '');
+        document.getElementById('draftReviewMeta').textContent = meta;
+
+        document.getElementById('draftSubject').value = draft.subject;
+        document.getElementById('draftBody').value = draft.body;
+
+        // Remember the original AI-drafted content so we can warn if the
+        // recruiter edits the textareas but tries to send before we add
+        // edit-persistence (a future enhancement).
+        const sendBtn = document.getElementById('draftSendBtn');
+        sendBtn.dataset.originalSubject = draft.subject;
+        sendBtn.dataset.originalBody = draft.body;
+
+        document.getElementById('draftReviewModal').classList.remove('hidden');
+    }
+
+    return { open, close, openDraftReview };
 })();
 
 window.CandidateModal = CandidateModal;

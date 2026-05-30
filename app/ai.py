@@ -79,7 +79,7 @@ class GeminiProvider:
     def __init__(self):
         # Configure the Google GenAI Client with our API key
         self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
-        self.model_name = "gemini-2.5-flash"
+        self.model_name = settings.LLM_MODEL_NAME
     
     async def analyze_text(self, prompt: str) -> str:
         """

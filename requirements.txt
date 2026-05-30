@@ -11,7 +11,9 @@ google-api-core
 resend
 httpx
 minio
-pypdf
+# pypdf is pinned to a maintained release line. Past versions have had CVEs
+# triggered by malformed PDFs (e.g. CVE-2023-36464); keep an eye on advisories.
+pypdf>=4.0,<6.0
 celery
 redis
 boto3
@@ -27,3 +29,6 @@ langchain-text-splitters
 langchain-google-genai
 langchain-postgres
 pgvector
+
+# Phase 6 — Recruiter Assistant Agent
+langgraph>=0.2.0
