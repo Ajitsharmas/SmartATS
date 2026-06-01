@@ -1,0 +1,8 @@
+# Development-only dependencies — pytest and friends.
+# Install with:  pip install -r requirements.txt -r requirements-dev.txt
+#
+# Production deploys should NOT install this file. Keep test deps out of
+# the runtime image to reduce attack surface.
+
+pytest>=8.0,<9.0
+pytest-asyncio>=0.23,<1.0
